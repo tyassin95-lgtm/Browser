@@ -1,7 +1,6 @@
 package com.slate.browser.web
 
 import android.annotation.SuppressLint
-import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -18,15 +17,15 @@ object WebViewConfigurator {
 
     @SuppressLint("SetJavaScriptEnabled")
     fun configure(webView: WebView, settings: Settings, desktopMode: Boolean) {
+        // Deliberately no layout params here. This runs again on every preference change,
+        // including on tabs already attached to their host, and layout params belong to the
+        // parent that adopted the view: handing a FrameLayout a bare ViewGroup.LayoutParams
+        // makes it throw on its next layout pass.
         webView.apply {
             isVerticalScrollBarEnabled = true
             isHorizontalScrollBarEnabled = false
             overScrollMode = WebView.OVER_SCROLL_IF_CONTENT_SCROLLS
             isScrollbarFadingEnabled = true
-            layoutParams = ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
-            )
         }
 
         webView.settings.apply {

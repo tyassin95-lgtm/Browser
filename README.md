@@ -5,7 +5,7 @@ for, and the smallest amount of chrome needed to get to the next one.
 
 ## Installing
 
-`dist/slate-browser-1.1.apk` is a signed release build. Copy it to the phone and open it;
+`dist/slate-browser-1.2.apk` is a signed release build. Copy it to the phone and open it;
 Android will ask you to allow installs from your file manager the first time. Minimum Android
 8.0 (API 26).
 
@@ -24,9 +24,21 @@ it and `keystore.properties` before publishing anywhere.
 
 ## What it does
 
-**Browsing.** Tabs with a visual switcher, back/forward, find in page, per-tab desktop/mobile
-switching, downloads, file uploads, pop-ups, camera/microphone/location prompts, page dialogs,
-and certificate warnings that name the host and make proceeding an explicit choice.
+**Browsing.** Tabs with a visual switcher, find in page, downloads, file uploads, pop-ups,
+camera/microphone/location prompts, page dialogs, and certificate warnings that name the host
+and make proceeding an explicit choice.
+
+**Navigation by swipe.** Drag right to go back, left to go forward, from anywhere on the page.
+The page is offered every touch first and the gesture is only taken over once the drag is
+clearly horizontal *and* nothing on the page wanted it — the document cannot pan any further,
+and the in-page agent found no horizontal scroller, slider, canvas or live text selection under
+the finger. Carousels, maps, range inputs and selection handles keep working. An arrow fills in
+as the swipe approaches the commit distance, so it can be judged and abandoned mid-gesture.
+Back also unwinds the browser's own layers in the order they appear, page history included.
+
+**Desktop sites.** Per tab, and remembered for that tab across restarts. Both halves are done:
+the user-agent *and* the layout viewport, because a responsive site reads its own viewport meta
+and would otherwise keep serving the phone layout however the UA is dressed up.
 
 **History and favourites.** Both are searchable. History is grouped by day and collapsed to one
 row per page with a visit count; it can be cleared by the hour, by the day, or entirely.
@@ -56,12 +68,26 @@ that was never marked `allowfullscreen`.
 This is the part that is not a wrapper around the Fullscreen API, because that API is exactly
 what these sites withhold. An agent injected at document start into *every* frame finds the video
 that is actually playing, pins it to the viewport, and undoes whatever was constraining it: the
-ancestor `transform`, `contain` or `will-change` that was acting as its containing block, the
-`overflow` and `clip-path` that were cropping it, and a page viewport left zoomed or laid out at
-desktop width. The stream is fitted with `object-fit: contain`, so it is letterboxed rather than
-stretched or cropped; a control toggles to edge-to-edge fill when you would rather trim the
-overhang. A black backdrop and the browser's own controls take the place of the site's player
-furniture, and a watchdog re-asserts the layout against players that rewrite it.
+ancestor `transform`, `contain`, `isolation` or `will-change` that was acting as its containing
+block or its stacking context, the `overflow` and `clip-path` that were cropping it, and a page
+viewport left zoomed or laid out at desktop width. The stream is fitted with
+`object-fit: contain`, so it is letterboxed rather than stretched or cropped; a control toggles
+to edge-to-edge fill when you would rather trim the overhang.
+
+Everything not on the path to the video is hidden outright rather than covered by a black
+overlay. An overlay is the wrong tool twice over: a hardware-decoded or WebRTC video is
+composited on its own surface and an opaque div can land in front of it — which shows as a black
+screen with the audio still playing — and an overlay only wins on z-index within one stacking
+context, so any ancestor that quietly creates one puts the page's furniture back on top. Picking
+the video is equally deliberate: the element making sound outranks a larger silent one, hidden
+decoys are skipped, and a canvas the player draws into is promoted alongside the media element
+so canvas-rendered players show a picture too. A watchdog re-asserts all of it against players
+that rewrite their own layout.
+
+**Media controls.** Play and pause, a scrub bar with position and duration, and volume. A live
+stream is treated as live: no scrub bar where there is nothing to scrub, a DVR bar where the
+stream keeps a rewind buffer, and a badge that turns into one-tap "go live" once you are behind
+the edge. Controls fade out on their own and come back on a tap.
 
 Where the video lives inside an embedded player, each frame on the way down is expanded in turn,
 so the picture ends up filling the display no matter how deeply it was nested. A stream wider
@@ -103,8 +129,8 @@ and it only accepts a call while the browser is genuinely waiting for one the us
 ## Tests
 
 ```
-./gradlew testDebugUnitTest    # 68 tests, Android framework via Robolectric
-cd tools && npm install && npm test   # 26 tests, the injected agent against a real DOM
+./gradlew testDebugUnitTest    # 94 tests, Android framework via Robolectric
+cd tools && npm install && npm test   # 31 tests, the injected agent against a real DOM
 ```
 
 The Android tests include `BrowserUiTest` and `MediaFullscreenTest`, which compose the actual
@@ -113,19 +139,27 @@ a person would. The media agent is JavaScript, so it is tested where it runs: in
 jsdom, against pages built to misbehave the way real ones do. Node is not required to build the
 app — only to run that suite.
 
-Six real defects were found by writing these. From the browser: a WebView provider that
-advertises algorithmic darkening and then throws (crashed on launch), a scrim that swallowed
-toolbar taps without dismissing the omnibox, and a desktop/mobile toggle that derived each
-user-agent from the previous one. From the media work: video ranking by area, which let a large
-paused preview outrank the small stream actually playing; a flat probe deadline, which expired
-before a player nested two frames deep could answer; and a rotation rule that read "dimensions
-not yet decoded" as landscape and turned the phone on a guess.
+Nine real defects were found by writing these. From the browser: a WebView provider that
+advertises algorithmic darkening and then throws (crashed on launch); a scrim that swallowed
+toolbar taps without dismissing the omnibox; a desktop/mobile toggle that derived each
+user-agent from the previous one; a configurator that replaced an attached WebView's
+`FrameLayout.LayoutParams` with bare `ViewGroup.LayoutParams`, so every preference toggle made
+the next layout pass throw; no back handler for page history at all, so the system back gesture
+closed the browser instead of navigating; and a bookmark star that could settle on the wrong
+state after two quick taps. From the media work: video ranking by area, which let a large paused
+preview outrank the small stream actually playing; a flat probe deadline, which expired before a
+player nested two frames deep could answer; and a rotation rule that read "dimensions not yet
+decoded" as landscape and turned the phone on a guess.
+
+One environment limit worth naming: a Material3 text field inside a dialog never reports idle
+under Robolectric, so those few dialogs are covered at the ViewModel level instead of by driving
+their UI.
 
 ## Layout
 
 ```
 data/    Room entities, DAOs, repository, settings
-web/     WebView configuration, WebViewClient, WebChromeClient, downloads, favicons, media agent
+web/     WebView configuration, clients, downloads, favicons, desktop mode, gestures, media
 assets/  media_agent.js — the in-page half of fullscreen video, injected into every frame
 tools/   Node test suite for that agent (not part of the Gradle build)
 tabs/    Tab model, the live-WebView budget, session persistence

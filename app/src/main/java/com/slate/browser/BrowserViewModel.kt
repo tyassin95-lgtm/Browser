@@ -33,17 +33,24 @@ import com.slate.browser.tabs.TabManager
 import com.slate.browser.tabs.TabPersistence
 import com.slate.browser.util.UrlUtils
 import com.slate.browser.web.BrowserHost
+import com.slate.browser.web.DesktopMode
 import com.slate.browser.web.DownloadCoordinator
 import com.slate.browser.web.FaviconStore
 import com.slate.browser.web.MediaAgent
 import com.slate.browser.web.MediaFit
 import com.slate.browser.web.MediaState
+import com.slate.browser.web.NavigationDirection
+import com.slate.browser.web.NavigationGestureListener
+import com.slate.browser.web.SlateWebView
+import kotlin.math.abs
 import com.slate.browser.web.JsDialogRequest
 import com.slate.browser.web.SitePermissionRequest
 import com.slate.browser.web.SlateWebChromeClient
 import com.slate.browser.web.SlateWebViewClient
 import com.slate.browser.web.WebViewConfigurator
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -53,6 +60,20 @@ import kotlinx.coroutines.launch
 
 /** The overlay currently covering the page, if any. Browsing is always the base layer. */
 enum class Overlay { NONE, TABS, BOOKMARKS, HISTORY, SETTINGS }
+
+/** What the back gesture should unwind next. */
+enum class BackAction {
+    EXIT_ELEMENT_FULLSCREEN,
+    EXIT_MEDIA_FULLSCREEN,
+    BLUR_OMNIBOX,
+    CLOSE_FIND,
+    DISMISS_OVERLAY,
+    EXIT_IMMERSIVE,
+    GO_BACK,
+
+    /** Nothing left to unwind: back belongs to the system again. */
+    LEAVE_BROWSER,
+}
 
 data class SslPrompt(val message: String, val onProceed: () -> Unit, val onCancel: () -> Unit)
 
@@ -71,6 +92,11 @@ class BrowserViewModel @JvmOverloads constructor(
 
     val faviconStore = FaviconStore(app, viewModelScope)
     private val mediaAgent = MediaAgent(app)
+    private val desktopMode = DesktopMode()
+
+    /** How far a swipe must travel to commit, in pixels, resolved once from the display. */
+    private val gestureCommitDistancePx =
+        96f * app.resources.displayMetrics.density
     val snackbarHostState = SnackbarHostState()
     val repo: BrowserRepository get() = repository
     val store: SettingsStore get() = settingsStore
@@ -90,6 +116,17 @@ class BrowserViewModel @JvmOverloads constructor(
     private var activityContext: Context? = null
     private var downloads: DownloadCoordinator? = null
     private var saveJob: Job? = null
+    private val bookmarkWrites = Mutex()
+
+    /** The database's view, and the taps that have not reached it yet. */
+    private var storedBookmarks: Set<String> = emptySet()
+    private val pendingBookmarks = mutableMapOf<String, Boolean>()
+
+    private fun publishBookmarks() {
+        bookmarkedUrls = pendingBookmarks.entries.fold(storedBookmarks) { acc, (url, wanted) ->
+            if (wanted) acc + url else acc - url
+        }
+    }
 
     val tabManager = TabManager(
         createWebView = { tab -> buildWebView(tab) },
@@ -114,6 +151,10 @@ class BrowserViewModel @JvmOverloads constructor(
         private set
     var mediaFit by mutableStateOf(MediaFit.CONTAIN)
         private set
+    /** Live horizontal navigation drag, for the on-screen affordance. */
+    var navGesture by mutableStateOf<NavGesture?>(null)
+        private set
+
     /** True while a landscape stream should hold the display sideways. */
     var lockLandscapeForMedia by mutableStateOf(false)
         private set
@@ -138,7 +179,13 @@ class BrowserViewModel @JvmOverloads constructor(
 
     init {
         viewModelScope.launch {
-            repository.bookmarkedUrls().collect { bookmarkedUrls = it }
+            repository.bookmarkedUrls().collect { stored ->
+                storedBookmarks = stored
+                // An optimistic value stands until the database actually agrees with it, so a
+                // quick second tap is never undone by an emission still describing the first.
+                pendingBookmarks.entries.removeAll { (url, wanted) -> stored.contains(url) == wanted }
+                publishBookmarks()
+            }
         }
     }
 
@@ -256,6 +303,37 @@ class BrowserViewModel @JvmOverloads constructor(
         if (headers.isEmpty()) webView.loadUrl(url) else webView.loadUrl(url, headers)
     }
 
+    /**
+     * The layers unwind in the order the user perceives them, and page history is part of that
+     * chain rather than an afterthought. Expressed as a value so the policy can be tested and
+     * so no layer can be forgotten by an overlapping set of conditions.
+     */
+    fun pendingBackAction(): BackAction = when {
+        fullscreenView != null -> BackAction.EXIT_ELEMENT_FULLSCREEN
+        isMediaFullscreen -> BackAction.EXIT_MEDIA_FULLSCREEN
+        isOmniboxFocused -> BackAction.BLUR_OMNIBOX
+        find.active -> BackAction.CLOSE_FIND
+        overlay != Overlay.NONE -> BackAction.DISMISS_OVERLAY
+        isImmersive -> BackAction.EXIT_IMMERSIVE
+        activeTab?.canGoBack == true -> BackAction.GO_BACK
+        else -> BackAction.LEAVE_BROWSER
+    }
+
+    /** Performs [pendingBackAction]; false means the browser has nothing left to do. */
+    fun handleBack(): Boolean {
+        when (pendingBackAction()) {
+            BackAction.EXIT_ELEMENT_FULLSCREEN -> onExitElementFullscreen()
+            BackAction.EXIT_MEDIA_FULLSCREEN -> exitMediaFullscreen()
+            BackAction.BLUR_OMNIBOX -> blurOmnibox()
+            BackAction.CLOSE_FIND -> closeFind()
+            BackAction.DISMISS_OVERLAY -> dismissOverlay()
+            BackAction.EXIT_IMMERSIVE -> exitImmersive()
+            BackAction.GO_BACK -> goBack()
+            BackAction.LEAVE_BROWSER -> return false
+        }
+        return true
+    }
+
     fun goBack(): Boolean {
         val webView = activeTab?.webView ?: return false
         if (!webView.canGoBack()) return false
@@ -284,12 +362,22 @@ class BrowserViewModel @JvmOverloads constructor(
     }
 
     /** Desktop mode is per tab and survives navigation within that tab. */
+    /**
+     * Desktop mode is per tab and survives navigation within that tab.
+     *
+     * Changing the user-agent alone is not enough: a responsive site reads the page's own
+     * viewport meta and would still lay out for a phone. [DesktopMode] widens the layout
+     * viewport to match, which is what actually produces the desktop version of a site.
+     */
     fun toggleDesktopMode() {
         val tab = activeTab ?: return
+        val webView = runCatching { tabManager.webViewFor(tab) }.getOrNull() ?: return
         tab.isDesktopMode = !tab.isDesktopMode
-        val webView = tabManager.webViewFor(tab)
-        WebViewConfigurator.configure(webView, settings.value, tab.isDesktopMode)
-        webView.reload()
+        runCatching {
+            WebViewConfigurator.configure(webView, settings.value, tab.isDesktopMode)
+            desktopMode.apply(webView, tab, tab.isDesktopMode)
+            webView.reload()
+        }.onFailure { snack("Couldn't switch this site") }
         snack(if (tab.isDesktopMode) "Desktop site" else "Mobile site")
         scheduleSessionSave()
     }
@@ -442,6 +530,21 @@ class BrowserViewModel @JvmOverloads constructor(
         activeTab?.webView?.let { mediaAgent.toggleMute(it) }
     }
 
+    fun seekMedia(positionMs: Long) {
+        activeTab?.webView?.let { mediaAgent.seekTo(it, positionMs) }
+    }
+
+    /** Returns to the live edge of a stream the viewer has scrubbed back from. */
+    fun jumpToLiveEdge() {
+        val state = media
+        if (!state.isLive) return
+        activeTab?.webView?.let { mediaAgent.seekTo(it, state.seekableEndMs) }
+    }
+
+    fun setMediaVolume(volume: Float) {
+        activeTab?.webView?.let { mediaAgent.setVolume(it, volume) }
+    }
+
     /**
      * Only a stream we know to be wider than it is tall earns the rotation. A live stream often
      * reports no dimensions until its first frame decodes, and turning the phone on a guess —
@@ -514,12 +617,24 @@ class BrowserViewModel @JvmOverloads constructor(
         }
         // The star flips at once; the database flow reconciles a moment later. Waiting on a
         // disk write to acknowledge a tap is the kind of lag that makes an app feel cheap.
+        // The star flips at once; waiting on a disk write to acknowledge a tap is the kind of
+        // lag that makes an app feel cheap.
         val url = tab.url
-        val wasBookmarked = bookmarkedUrls.contains(url)
-        bookmarkedUrls = if (wasBookmarked) bookmarkedUrls - url else bookmarkedUrls + url
+        val wanted = !bookmarkedUrls.contains(url)
+        pendingBookmarks[url] = wanted
+        publishBookmarks()
+
         viewModelScope.launch {
-            val added = repository.toggleBookmark(url, tab.displayTitle)
-            bookmarkedUrls = if (added) bookmarkedUrls + url else bookmarkedUrls - url
+            // Serialised, so two quick taps reach the database in the order they were made.
+            val added = bookmarkWrites.withLock {
+                runCatching { repository.toggleBookmark(url, tab.displayTitle) }.getOrNull()
+            }
+            if (added == null) {
+                pendingBookmarks.remove(url)
+                publishBookmarks()
+                snack("Couldn't save that favourite")
+                return@launch
+            }
             snack(if (added) "Added to favourites" else "Removed from favourites")
         }
     }
@@ -563,24 +678,31 @@ class BrowserViewModel @JvmOverloads constructor(
 
     // ---- Settings -----------------------------------------------------------
 
-    fun setTheme(mode: ThemeMode) {
-        viewModelScope.launch { settingsStore.setTheme(mode) }
+    /**
+     * Every preference change goes through here.
+     *
+     * Storage can fail — a full disk, a corrupted preferences file, a WebView that rejects a
+     * setting — and none of those are worth losing the user's tabs over. A failed change is
+     * reported and the browser carries on with the value it already had.
+     */
+    private fun editSettings(block: suspend () -> Unit) {
+        viewModelScope.launch {
+            runCatching { block() }.onFailure { snack("Couldn't save that setting") }
+        }
     }
 
-    fun setSearchEngine(engine: SearchEngine) {
-        viewModelScope.launch { settingsStore.setSearchEngine(engine) }
-    }
+    fun setTheme(mode: ThemeMode) = editSettings { settingsStore.setTheme(mode) }
 
-    fun setHomePage(url: String) {
-        viewModelScope.launch { settingsStore.setHomePage(url) }
-    }
+    fun setSearchEngine(engine: SearchEngine) = editSettings { settingsStore.setSearchEngine(engine) }
+
+    fun setHomePage(url: String) = editSettings { settingsStore.setHomePage(url) }
 
     /**
      * Applies a preference and, where it changes how a page behaves, replays it onto the live
      * tabs immediately rather than waiting for the next navigation.
      */
     fun setToggle(toggle: SettingToggle, value: Boolean) {
-        viewModelScope.launch {
+        editSettings {
             when (toggle) {
                 SettingToggle.JAVASCRIPT -> settingsStore.setJavaScript(value)
                 SettingToggle.DESKTOP_DEFAULT -> settingsStore.setDesktopDefault(value)
@@ -607,15 +729,17 @@ class BrowserViewModel @JvmOverloads constructor(
         }
     }
 
+    /** One tab refusing a setting must not stop the others from receiving it. */
     private fun reapplySettingsToLiveTabs() {
         val current = settings.value
         tabManager.tabs.forEach { tab ->
-            tab.webView?.let { WebViewConfigurator.configure(it, current, tab.isDesktopMode) }
+            val webView = tab.webView ?: return@forEach
+            runCatching { WebViewConfigurator.configure(webView, current, tab.isDesktopMode) }
         }
     }
 
     fun clearBrowsingData() {
-        viewModelScope.launch {
+        editSettings {
             repository.clearHistory()
             faviconStore.clear()
             CookieManager.getInstance().removeAllCookies(null)
@@ -673,7 +797,7 @@ class BrowserViewModel @JvmOverloads constructor(
     private fun buildWebView(tab: Tab): WebView {
         val context = activityContext ?: getApplication<Application>()
         val browserHost = host
-        val webView = WebView(context)
+        val webView = SlateWebView(context)
         WebViewConfigurator.configure(webView, settings.value, tab.isDesktopMode)
 
         webView.webViewClient = SlateWebViewClient(
@@ -695,7 +819,10 @@ class BrowserViewModel @JvmOverloads constructor(
                 target.progress = 1f
                 target.canGoBack = target.webView?.canGoBack() == true
                 target.canGoForward = target.webView?.canGoForward() == true
-                target.webView?.let { mediaAgent.injectIntoMainFrame(it) }
+                target.webView?.let { webView ->
+                    mediaAgent.injectIntoMainFrame(webView)
+                    desktopMode.reassert(webView, target.isDesktopMode)
+                }
                 if (settings.value.saveHistory && target.errorMessage == null) {
                     viewModelScope.launch { repository.recordVisit(url, title) }
                 }
@@ -734,10 +861,14 @@ class BrowserViewModel @JvmOverloads constructor(
         }
         downloads?.let { webView.addJavascriptInterface(it.JsBridge(), "SlateDownload") }
 
+        webView.navigationListener = navigationListenerFor(tab)
+
         mediaAgent.install(webView)
+        desktopMode.apply(webView, tab, tab.isDesktopMode)
         webView.addJavascriptInterface(
             mediaAgent.Bridge(
                 onState = { state -> onMediaState(tab, state) },
+                onNavigationHint = { suppress -> onNavigationHint(tab, suppress) },
                 onEnterResult = { success ->
                     if (!success && isMediaFullscreen) {
                         exitMediaFullscreen()
@@ -759,6 +890,48 @@ class BrowserViewModel @JvmOverloads constructor(
         }
 
         return webView
+    }
+
+    /**
+     * Turns an unused horizontal swipe into history navigation, with the drag distance driving
+     * the on-screen arrow so the gesture can be abandoned by dragging back.
+     */
+    private fun navigationListenerFor(tab: Tab) = object : NavigationGestureListener {
+        override fun canNavigate(direction: NavigationDirection): Boolean {
+            val webView = tab.webView ?: return false
+            return if (direction == NavigationDirection.BACK) webView.canGoBack() else webView.canGoForward()
+        }
+
+        override fun onGestureStart(direction: NavigationDirection) {
+            navGesture = NavGesture(direction, 0f)
+        }
+
+        override fun onGestureProgress(distancePx: Float) {
+            navGesture = navGesture?.copy(progress = progressOf(distancePx))
+        }
+
+        override fun onGestureFinish(distancePx: Float) {
+            val committed = progressOf(distancePx) >= 1f
+            val direction = navGesture?.direction
+            navGesture = null
+            if (!committed) return
+            if (direction == NavigationDirection.BACK) goBack() else goForward()
+        }
+
+        override fun onGestureCancel() {
+            navGesture = null
+        }
+
+        private fun progressOf(distancePx: Float) =
+            (abs(distancePx) / gestureCommitDistancePx).coerceIn(0f, 1f)
+    }
+
+    /**
+     * A page agent found something under the finger that pans horizontally by itself, so the
+     * navigation gesture must stand down for this touch.
+     */
+    private fun onNavigationHint(tab: Tab, suppress: Boolean) {
+        (tab.webView as? SlateWebView)?.suppressNavigationGesture = suppress
     }
 
     /**
@@ -843,3 +1016,6 @@ class BrowserViewModel @JvmOverloads constructor(
         const val THUMBNAIL_WIDTH = 360
     }
 }
+
+/** An in-flight horizontal navigation drag. */
+data class NavGesture(val direction: NavigationDirection, val progress: Float)

@@ -62,6 +62,9 @@ class Tab(
     /** WebView back/forward state for a hibernated tab. */
     internal var savedState: Bundle? = null
 
+    /** Handle for the desktop-viewport script, so it can be removed when the mode is turned off. */
+    internal var desktopScript: androidx.webkit.ScriptHandler? = null
+
     /** Deferred load for tabs restored from disk that have never been shown. */
     internal var pendingUrl: String? = null
 

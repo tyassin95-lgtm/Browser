@@ -9,6 +9,7 @@ import android.webkit.WebChromeClient
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
@@ -292,9 +293,77 @@ class MediaFullscreenTest {
         // Every control the viewer needs is the browser's, because in this mode the page's own
         // controls are deliberately unreachable.
         compose.onNodeWithContentDescription("Pause").assertIsDisplayed()
-        compose.onNodeWithContentDescription("Mute").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Volume").assertIsDisplayed()
         compose.onNodeWithContentDescription("Fill the screen").assertIsDisplayed()
         compose.onNodeWithContentDescription("Exit fullscreen").assertIsDisplayed()
+    }
+
+    @Test
+    fun `a recorded video gets a scrub bar and its position`() {
+        render()
+        playing(
+            MediaState(
+                hasVideo = true, isPlaying = true, width = 1920, height = 1080,
+                positionMs = 65_000, durationMs = 300_000,
+            )
+        )
+        viewModel.enterMediaFullscreen()
+        compose.mainClock.advanceTimeBy(500)
+        compose.waitForIdle()
+
+        compose.onNodeWithContentDescription("Seek").assertIsDisplayed()
+        compose.onNodeWithText("1:05").assertIsDisplayed()
+        compose.onNodeWithText("5:00").assertIsDisplayed()
+    }
+
+    @Test
+    fun `a live stream with no rewind buffer gets no scrub bar`() {
+        render()
+        playing(widescreenLive)
+        viewModel.enterMediaFullscreen()
+        compose.mainClock.advanceTimeBy(500)
+        compose.waitForIdle()
+
+        // A bar that snaps straight back to the edge is worse than no bar at all.
+        compose.onNodeWithContentDescription("Seek").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Live").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Pause").assertIsDisplayed()
+    }
+
+    @Test
+    fun `a live stream with a rewind buffer can be scrubbed and returned to the edge`() {
+        render()
+        playing(
+            MediaState(
+                hasVideo = true, isPlaying = true, isLive = true, width = 1920, height = 1080,
+                positionMs = 300_000, seekableStartMs = 60_000, seekableEndMs = 360_000,
+            )
+        )
+        viewModel.enterMediaFullscreen()
+        compose.mainClock.advanceTimeBy(500)
+        compose.waitForIdle()
+
+        compose.onNodeWithContentDescription("Seek").assertIsDisplayed()
+        // A minute behind the edge, so the badge offers the way back rather than saying LIVE.
+        compose.onNodeWithContentDescription("Go live").assertIsDisplayed()
+    }
+
+    @Test
+    fun `live state is derived from the stream, not guessed`() {
+        val noBuffer = MediaState(hasVideo = true, isLive = true, seekableStartMs = 0, seekableEndMs = 4_000)
+        assertFalse("four seconds is not a rewind buffer", noBuffer.hasLiveWindow)
+        assertFalse(noBuffer.isSeekable)
+
+        val dvr = MediaState(hasVideo = true, isLive = true, seekableStartMs = 0, seekableEndMs = 120_000)
+        assertTrue(dvr.hasLiveWindow)
+
+        val vod = MediaState(hasVideo = true, durationMs = 90_000, positionMs = 10_000)
+        assertTrue(vod.isSeekable)
+        assertTrue("a recording is always at its own edge", vod.isAtLiveEdge)
+
+        val behind = MediaState(hasVideo = true, isLive = true, positionMs = 100_000, seekableEndMs = 160_000)
+        assertEquals(60_000L, behind.behindLiveMs)
+        assertFalse(behind.isAtLiveEdge)
     }
 
     @Test

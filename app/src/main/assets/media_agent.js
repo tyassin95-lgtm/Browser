@@ -21,7 +21,8 @@
   var NS = 'slate.media.v1';
   var TOP = window.top === window;
   var Z_VIDEO = '2147483647';
-  var Z_BACKDROP = '2147483646';
+  var Z_CANVAS = '2147483647';
+  var Z_VIDEO_UNDER_CANVAS = '2147483646';
   /*
    * A probe walks down the frame tree and the answers walk back up, so every level must reply
    * before the level above stops listening. Each hop therefore gets a smaller budget than its
@@ -39,7 +40,7 @@
   var fillMode = 'contain';
   var stashed = [];           // [{ el, style }] to restore on exit
   var savedControls = null;
-  var backdrop = null;
+  var activeCanvas = null;
   var styleTag = null;
   var watchdog = null;
   var savedViewport = null;
@@ -75,8 +76,19 @@
    * a tier. The offsets are far larger than any plausible pixel area, so the ordering holds.
    */
   var TIER_PLAYING = 1e9;
+  var TIER_AUDIBLE = 7e8;
   var TIER_LIVE = 5e8;
   var TIER_READY = 1e6;
+
+  /** A video the page has hidden is a decoy, however large its box claims to be. */
+  function isPainted(el) {
+    try {
+      var style = getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
+      if (parseFloat(style.opacity || '1') < 0.05) return false;
+      return true;
+    } catch (e) { return true; }
+  }
 
   function score(v) {
     try {
@@ -84,9 +96,14 @@
       var w = Math.max(0, r.width), h = Math.max(0, r.height);
       // Tracking pixels and thumbnail tiles are never what fullscreen is for.
       if (w < 48 || h < 48) return 0;
+      if (!isPainted(v)) return 0;
 
       var s = w * h + (v.videoWidth || 0) * (v.videoHeight || 0) / 40;
       if (!v.paused && !v.ended) s += TIER_PLAYING;
+      // The element making the sound is the one being watched. Without this a large muted
+      // teaser in the host page can outrank the stream itself, which is how a viewer ends up
+      // looking at a black box while the audio carries on somewhere else.
+      if (!v.paused && !v.muted && (v.volume === undefined || v.volume > 0)) s += TIER_AUDIBLE;
       if (v.duration === Infinity) s += TIER_LIVE;
       if (v.readyState > 0) s += TIER_READY;
       return s;
@@ -102,13 +119,28 @@
     return best ? { el: best, score: bestScore } : null;
   }
 
+  function seekableWindow(v) {
+    try {
+      if (!v.seekable || v.seekable.length === 0) return null;
+      return { start: v.seekable.start(0), end: v.seekable.end(v.seekable.length - 1) };
+    } catch (e) { return null; }
+  }
+
   function describe(v) {
+    var duration = typeof v.duration === 'number' ? v.duration : NaN;
+    var live = duration === Infinity || (isNaN(duration) && v.readyState > 0 && !v.paused);
+    var window = seekableWindow(v);
     return {
       w: v.videoWidth || 0,
       h: v.videoHeight || 0,
-      live: v.duration === Infinity,
+      live: !!live,
       playing: !v.paused && !v.ended,
-      muted: !!v.muted
+      muted: !!v.muted,
+      volume: typeof v.volume === 'number' ? v.volume : 1,
+      t: typeof v.currentTime === 'number' && isFinite(v.currentTime) ? v.currentTime : 0,
+      d: isFinite(duration) ? duration : 0,
+      ss: window && isFinite(window.start) ? window.start : 0,
+      se: window && isFinite(window.end) ? window.end : 0
     };
   }
 
@@ -148,6 +180,10 @@
         'overflow': 'visible',
         'opacity': '1',
         'z-index': 'auto',
+        'isolation': 'auto',
+        'mix-blend-mode': 'normal',
+        'transform-style': 'flat',
+        'zoom': '1',
         'display': node.style.display === 'none' ? 'block' : (getComputedStyle(node).display === 'none' ? 'block' : '')
       });
       node = node.parentElement;
@@ -220,31 +256,73 @@
     savedViewport = null;
   }
 
+  /*
+   * Everything that is not on the path to the video is hidden outright, rather than covered by
+   * a black overlay of our own.
+   *
+   * An overlay looked simpler but is the wrong tool twice over. A hardware-decoded or WebRTC
+   * video is composited on its own surface, and an opaque div can end up in front of it — which
+   * shows as a black screen with the audio still playing. And an overlay only wins on z-index
+   * within one stacking context, so any ancestor that quietly creates one puts the page's
+   * furniture back on top. Hiding the siblings has neither failure mode: there is nothing left
+   * to paint over the picture.
+   */
+  function isolateElement(el) {
+    var node = el;
+    var guard = 0;
+    while (node && node !== document.documentElement && guard++ < 200) {
+      var parent = node.parentElement;
+      if (!parent) break;
+      each(parent.children, function (child) {
+        if (child === node) return;
+        if (child.hasAttribute && child.hasAttribute('data-slate-keep')) return;
+        var tag = child.tagName;
+        if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'LINK' || tag === 'META') return;
+        stash(child);
+        force(child, { 'display': 'none' });
+      });
+      // Letterbox bars should be black, not whatever the page painted behind the player.
+      stash(parent);
+      force(parent, { 'background': 'transparent' });
+      node = parent;
+    }
+  }
+
   function addChrome() {
     overrideViewport();
-    if (!backdrop) {
-      backdrop = document.createElement('div');
-      backdrop.setAttribute('data-slate-backdrop', '');
-      force(backdrop, {
-        'position': 'fixed', 'top': '0', 'left': '0',
-        'width': '100vw', 'height': '100vh',
-        'margin': '0', 'background': '#000', 'z-index': Z_BACKDROP
-      });
-      (document.body || document.documentElement).appendChild(backdrop);
-    }
     if (!styleTag) {
       styleTag = document.createElement('style');
       styleTag.setAttribute('data-slate-theater', '');
       styleTag.textContent =
-        'html,body{overflow:hidden !important;margin:0 !important;background:#000 !important;}' +
-        // Nothing the page anchors to the viewport may sit over the stream.
-        'body>*:not([data-slate-backdrop]){pointer-events:none !important;}';
+        'html,body{overflow:hidden !important;margin:0 !important;padding:0 !important;' +
+        'background:#000 !important;}';
       (document.head || document.documentElement).appendChild(styleTag);
     }
   }
 
   function applyFill() {
     if (activeVideo) force(activeVideo, { 'object-fit': fillMode, 'object-position': 'center' });
+    if (activeCanvas) force(activeCanvas, { 'object-fit': fillMode, 'object-position': 'center' });
+  }
+
+  /** A canvas covering the same box as the video, i.e. the thing actually being drawn. */
+  function companionCanvas(video) {
+    try {
+      var vr = video.getBoundingClientRect();
+      var vArea = vr.width * vr.height;
+      if (vArea <= 0) return null;
+      var best = null, bestArea = 0;
+      each(document.querySelectorAll('canvas'), function (c) {
+        if (!isPainted(c)) return;
+        var r = c.getBoundingClientRect();
+        var overlap = Math.max(0, Math.min(vr.right, r.right) - Math.max(vr.left, r.left)) *
+                      Math.max(0, Math.min(vr.bottom, r.bottom) - Math.max(vr.top, r.top));
+        if (overlap < vArea * 0.6) return;
+        var area = r.width * r.height;
+        if (area > bestArea) { bestArea = area; best = c; }
+      });
+      return best;
+    } catch (e) { return null; }
   }
 
   /**
@@ -263,6 +341,10 @@
           if (activeVideo.controls) activeVideo.controls = false;
         } else if (routeChild && routeChild.isConnected) {
           force(routeChild, PINNED);
+        } else if (activeCanvas && activeCanvas.isConnected) {
+          force(activeCanvas, PINNED);
+          force(activeCanvas, { 'z-index': Z_CANVAS });
+          applyFill();
         } else if (activeVideo) {
           // The player replaced its media element; adopt the new one rather than dropping out.
           var next = bestLocal();
@@ -285,6 +367,8 @@
     if (winnerChild && winnerChild.isConnected) {
       // The video lives further down; make the path to it fill the screen and pass it on.
       routeChild = winnerChild;
+      routeChild.setAttribute('data-slate-keep', '');
+      isolateElement(routeChild);
       pin(routeChild);
       force(routeChild, { 'background': '#000' });
       post(routeChild.contentWindow, { ns: NS, type: 'enter', fill: fillMode });
@@ -297,13 +381,29 @@
     if (!local) { cleanup(); return false; }
 
     activeVideo = local.el;
+    activeCanvas = companionCanvas(activeVideo);
+
+    activeVideo.setAttribute('data-slate-keep', '');
+    if (activeCanvas) activeCanvas.setAttribute('data-slate-keep', '');
+
+    isolateElement(activeVideo);
+    if (activeCanvas) isolateElement(activeCanvas);
+
     savedControls = activeVideo.controls;
     try { activeVideo.controls = false; } catch (e) { /* ignore */ }
     pin(activeVideo);
-    applyFill();
     try { activeVideo.setAttribute('playsinline', ''); } catch (e) { /* ignore */ }
+
+    if (activeCanvas) {
+      // Some players decode into a canvas and keep the media element only for its audio and
+      // timeline. Promoting both, canvas on top, shows the picture either way.
+      pin(activeCanvas);
+      force(activeCanvas, { 'z-index': Z_CANVAS });
+    }
+    applyFill();
     active = true;
     startWatchdog();
+    reportProgress();
     return true;
   }
 
@@ -321,7 +421,10 @@
       try { activeVideo.controls = savedControls; } catch (e) { /* ignore */ }
     }
     savedControls = null;
-    if (backdrop) { try { backdrop.remove(); } catch (e) { /* ignore */ } backdrop = null; }
+    each(document.querySelectorAll('[data-slate-keep]'), function (el) {
+      try { el.removeAttribute('data-slate-keep'); } catch (e) { /* ignore */ }
+    });
+    activeCanvas = null;
     if (styleTag) { try { styleTag.remove(); } catch (e) { /* ignore */ } styleTag = null; }
     restoreViewport();
     active = false;
@@ -347,6 +450,23 @@
     try {
       if (type === 'playPause') { if (v.paused) v.play(); else v.pause(); }
       else if (type === 'mute') { v.muted = !v.muted; }
+      else if (type === 'seek') {
+        var target = parseFloat(arg);
+        if (isFinite(target)) {
+          // Clamp into whatever the stream will actually accept, which for a live edge is the
+          // seekable window rather than the duration.
+          var win = seekableWindow(v);
+          if (win) target = Math.max(win.start, Math.min(win.end, target));
+          v.currentTime = target;
+        }
+      }
+      else if (type === 'volume') {
+        var level = parseFloat(arg);
+        if (isFinite(level)) {
+          v.volume = Math.max(0, Math.min(1, level));
+          if (v.volume > 0) v.muted = false;
+        }
+      }
       else if (type === 'fill') { fillMode = arg; activeVideo = v; applyFill(); }
     } catch (e) { /* ignore */ }
     scheduleReport();
@@ -402,6 +522,11 @@
       muted: !!(info && info.muted),
       w: info ? info.w : 0,
       h: info ? info.h : 0,
+      volume: info && typeof info.volume === 'number' ? info.volume : 1,
+      t: info ? info.t || 0 : 0,
+      d: info ? info.d || 0 : 0,
+      ss: info ? info.ss || 0 : 0,
+      se: info ? info.se || 0 : 0,
       fullscreen: active
     };
     try {
@@ -409,6 +534,27 @@
         window.SlateMedia.report(JSON.stringify(state));
       }
     } catch (e) { /* ignore */ }
+  }
+
+  /*
+   * While fullscreen, the browser draws the transport controls, so it needs the position and
+   * the seekable window continuously rather than only when something is probed. Updates ride
+   * the same route back up as everything else, so a video inside an embedded player reports
+   * just as readily as one in the top document.
+   */
+  var progressTimer = null;
+
+  function reportProgress() {
+    if (progressTimer) return;
+    progressTimer = setTimeout(function () {
+      progressTimer = null;
+      if (!active) return;
+      var v = activeVideo;
+      if (!v || !v.isConnected) return;
+      var info = describe(v);
+      if (TOP) publish(info);
+      else post(parent, { ns: NS, type: 'progress', info: info });
+    }, 250);
   }
 
   var probeSeq = 0;
@@ -450,13 +596,83 @@
       }
       return;
     }
-    if (d.type === 'changed') { scheduleReport(); }
+    if (d.type === 'progress') {
+      if (TOP) publish(d.info);
+      else post(parent, { ns: NS, type: 'progress', info: d.info });
+      return;
+    }
+    if (d.type === 'changed') { scheduleReport(); return; }
+    if (d.type === 'touch') { reportTouch(d.suppress); }
   }, false);
+
+  /*
+   * The browser turns an unused horizontal swipe into back/forward, but only the page knows
+   * whether the finger landed on something that pans by itself. Anything scrollable sideways, a
+   * slider, an editable field or a live text selection means the swipe belongs to the page, so
+   * that verdict is sent up on touch down and the native gesture stands down for that touch.
+   */
+  function panWidthExceeds(el) {
+    try {
+      var style = getComputedStyle(el);
+      var overflowX = style.overflowX;
+      var scrollable = overflowX === 'auto' || overflowX === 'scroll';
+      if (scrollable && el.scrollWidth > el.clientWidth + 2) return true;
+      // Carousels and maps commonly declare their intent instead of overflowing.
+      var touchAction = style.touchAction;
+      if (touchAction === 'none' || touchAction === 'pan-y' || touchAction === 'pinch-zoom') return true;
+      return false;
+    } catch (e) { return false; }
+  }
+
+  function ownsHorizontalTouch(target) {
+    try {
+      var selection = document.getSelection();
+      if (selection && !selection.isCollapsed) return true;
+    } catch (e) { /* ignore */ }
+
+    var node = target;
+    var guard = 0;
+    while (node && node.nodeType === 1 && guard++ < 60) {
+      var tag = node.tagName;
+      if (tag === 'INPUT' && (node.type === 'range' || node.type === 'number')) return true;
+      if (tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'CANVAS' || tag === 'SVG') return true;
+      if (node.isContentEditable) return true;
+      if (node.getAttribute && node.getAttribute('draggable') === 'true') return true;
+      if (panWidthExceeds(node)) return true;
+      node = node.parentElement;
+    }
+    return false;
+  }
+
+  function reportTouch(suppress) {
+    if (TOP) {
+      try {
+        if (window.SlateMedia && window.SlateMedia.navigationHint) {
+          window.SlateMedia.navigationHint(!!suppress);
+        }
+      } catch (e) { /* ignore */ }
+    } else {
+      post(parent, { ns: NS, type: 'touch', suppress: !!suppress });
+    }
+  }
+
+  document.addEventListener('touchstart', function (e) {
+    if (!e.touches || e.touches.length !== 1) { reportTouch(true); return; }
+    // Fullscreen media takes every touch itself, so navigation must not compete for it.
+    reportTouch(active || ownsHorizontalTouch(e.target));
+  }, true);
 
   ['play', 'playing', 'pause', 'ended', 'loadedmetadata', 'durationchange', 'emptied', 'resize']
     .forEach(function (type) {
       document.addEventListener(type, function (e) {
         if (e.target && e.target.tagName === 'VIDEO') scheduleReport();
+      }, true);
+    });
+
+  ['timeupdate', 'progress', 'volumechange', 'seeked', 'waiting']
+    .forEach(function (type) {
+      document.addEventListener(type, function (e) {
+        if (e.target === activeVideo) reportProgress();
       }, true);
     });
 

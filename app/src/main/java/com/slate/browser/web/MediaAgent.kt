@@ -17,6 +17,11 @@ data class MediaState(
     val isMuted: Boolean = false,
     val width: Int = 0,
     val height: Int = 0,
+    val volume: Float = 1f,
+    val positionMs: Long = 0,
+    val durationMs: Long = 0,
+    val seekableStartMs: Long = 0,
+    val seekableEndMs: Long = 0,
 ) {
     /** Natural aspect ratio of the stream, or 0 when nothing has been decoded yet. */
     val aspect: Float get() = if (width > 0 && height > 0) width.toFloat() / height else 0f
@@ -27,8 +32,26 @@ data class MediaState(
      */
     val prefersLandscape: Boolean get() = aspect >= 1.15f
 
+    /** A recorded video with a known length: an ordinary scrub bar applies. */
+    val isSeekable: Boolean get() = !isLive && durationMs > 0
+
+    /**
+     * A live stream that keeps a rewind buffer. Below this there is nothing useful to scrub
+     * through, and offering a bar that snaps back to the edge would just look broken.
+     */
+    val hasLiveWindow: Boolean
+        get() = isLive && (seekableEndMs - seekableStartMs) >= MIN_DVR_WINDOW_MS
+
+    /** How far behind the live edge the viewer currently is. */
+    val behindLiveMs: Long
+        get() = if (isLive) (seekableEndMs - positionMs).coerceAtLeast(0) else 0
+
+    val isAtLiveEdge: Boolean get() = !isLive || behindLiveMs <= LIVE_EDGE_TOLERANCE_MS
+
     companion object {
         val NONE = MediaState()
+        private const val MIN_DVR_WINDOW_MS = 30_000L
+        private const val LIVE_EDGE_TOLERANCE_MS = 5_000L
     }
 }
 
@@ -98,6 +121,12 @@ class MediaAgent(context: Context) {
 
     fun toggleMute(webView: WebView) = command(webView, "mute")
 
+    fun seekTo(webView: WebView, positionMs: Long) =
+        command(webView, "seek", (positionMs / 1000.0).toString())
+
+    fun setVolume(webView: WebView, volume: Float) =
+        command(webView, "volume", volume.coerceIn(0f, 1f).toString())
+
     private fun command(webView: WebView, name: String, arg: String? = null) {
         val argument = if (arg == null) "null" else "'${arg.replace("'", "")}'"
         webView.evaluateJavascript(
@@ -113,7 +142,17 @@ class MediaAgent(context: Context) {
     inner class Bridge(
         private val onState: (MediaState) -> Unit,
         private val onEnterResult: (Boolean) -> Unit,
+        private val onNavigationHint: (Boolean) -> Unit = {},
     ) {
+        /**
+         * The page's verdict on whether the finger that just went down belongs to it. Arrives on
+         * touch down, well before a drag can travel far enough to count as a swipe.
+         */
+        @JavascriptInterface
+        fun navigationHint(suppress: Boolean) {
+            main.post { onNavigationHint(suppress) }
+        }
+
         @JavascriptInterface
         fun report(json: String) {
             val state = runCatching {
@@ -125,6 +164,11 @@ class MediaAgent(context: Context) {
                     isMuted = o.optBoolean("muted"),
                     width = o.optInt("w").coerceIn(0, 16384),
                     height = o.optInt("h").coerceIn(0, 16384),
+                    volume = o.optDouble("volume", 1.0).toFloat().coerceIn(0f, 1f),
+                    positionMs = o.seconds("t"),
+                    durationMs = o.seconds("d"),
+                    seekableStartMs = o.seconds("ss"),
+                    seekableEndMs = o.seconds("se"),
                 )
             }.getOrNull() ?: return
             main.post { onState(state) }
@@ -138,5 +182,14 @@ class MediaAgent(context: Context) {
 
     private companion object {
         const val ASSET = "media_agent.js"
+
+        /** Times arrive as seconds from the page, and a page can send anything at all. */
+        fun JSONObject.seconds(key: String): Long {
+            val value = optDouble(key, 0.0)
+            if (value.isNaN() || value.isInfinite() || value < 0) return 0
+            return (value * 1000).toLong().coerceAtMost(MAX_DURATION_MS)
+        }
+
+        const val MAX_DURATION_MS = 24L * 60 * 60 * 1000
     }
 }

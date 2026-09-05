@@ -30,10 +30,15 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.ArrowForward
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.Surface
@@ -50,15 +55,19 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import com.slate.browser.BackAction
 import com.slate.browser.BrowserViewModel
+import com.slate.browser.NavGesture
 import com.slate.browser.Overlay
 import com.slate.browser.data.Suggestion
 import com.slate.browser.web.MediaFit
+import com.slate.browser.web.NavigationDirection
 import com.slate.browser.ui.components.FindBar
 import com.slate.browser.ui.components.FullscreenHost
 import com.slate.browser.ui.components.LandscapeBar
@@ -236,6 +245,11 @@ fun BrowserScreen(
             )
         }
 
+        // ---- Horizontal navigation gesture ---------------------------------
+        viewModel.navGesture?.let { gesture ->
+            NavigationGestureAffordance(gesture, Modifier.fillMaxSize())
+        }
+
         // ---- Immersive affordances -----------------------------------------
         if (immersive && !mediaFullscreen) {
             ImmersiveExitAffordance(onExit = viewModel::exitImmersive)
@@ -245,15 +259,16 @@ fun BrowserScreen(
         if (mediaFullscreen && viewModel.fullscreenView == null) {
             MediaFullscreenOverlay(
                 mode = MediaOverlayMode.BROWSER,
-                isPlaying = viewModel.media.isPlaying,
-                isMuted = viewModel.media.isMuted,
-                isLive = viewModel.media.isLive,
+                media = viewModel.media,
                 isFilling = viewModel.mediaFit == MediaFit.COVER,
                 showFitControl = true,
                 onExit = viewModel::exitMediaFullscreen,
                 onTogglePlay = viewModel::toggleMediaPlayback,
                 onToggleMute = viewModel::toggleMediaMute,
                 onToggleFit = viewModel::toggleMediaFit,
+                onSeek = viewModel::seekMedia,
+                onJumpToLive = viewModel::jumpToLiveEdge,
+                onVolume = viewModel::setMediaVolume,
             )
         }
 
@@ -267,15 +282,16 @@ fun BrowserScreen(
             // recovery never depends on the site drawing a working close button.
             MediaFullscreenOverlay(
                 mode = MediaOverlayMode.PAGE,
-                isPlaying = viewModel.media.isPlaying,
-                isMuted = viewModel.media.isMuted,
-                isLive = viewModel.media.isLive,
+                media = viewModel.media,
                 isFilling = false,
                 showFitControl = false,
                 onExit = viewModel::onExitElementFullscreen,
                 onTogglePlay = viewModel::toggleMediaPlayback,
                 onToggleMute = viewModel::toggleMediaMute,
                 onToggleFit = {},
+                onSeek = viewModel::seekMedia,
+                onJumpToLive = viewModel::jumpToLiveEdge,
+                onVolume = viewModel::setMediaVolume,
             )
         }
 
@@ -302,32 +318,59 @@ fun BrowserScreen(
     )
 
     // ---- Back handling ----------------------------------------------------
-    // Each layer consumes back in the order the user perceives them.
-    BackHandler(enabled = viewModel.fullscreenView != null) { viewModel.onExitElementFullscreen() }
-    BackHandler(enabled = viewModel.fullscreenView == null && viewModel.isMediaFullscreen) {
-        viewModel.exitMediaFullscreen()
+    BackHandler(enabled = viewModel.pendingBackAction() != BackAction.LEAVE_BROWSER) {
+        viewModel.handleBack()
     }
-    BackHandler(
-        enabled = viewModel.fullscreenView == null && !viewModel.isMediaFullscreen &&
-            viewModel.isOmniboxFocused,
-    ) {
-        viewModel.blurOmnibox()
+}
+
+/**
+ * The arrow that follows a back/forward swipe. It fills in as the drag approaches the commit
+ * distance and settles when it is past it, so the gesture can be judged — and abandoned by
+ * dragging back — without watching the page.
+ */
+@Composable
+private fun NavigationGestureAffordance(gesture: NavGesture, modifier: Modifier = Modifier) {
+    val back = gesture.direction == NavigationDirection.BACK
+    val committed = gesture.progress >= 1f
+    val scale by animateFloatAsState(
+        targetValue = if (committed) 1f else 0.82f,
+        animationSpec = tween(Motion.FAST),
+        label = "navGestureScale",
+    )
+
+    Box(modifier) {
+        Box(
+            Modifier
+                .align(if (back) Alignment.CenterStart else Alignment.CenterEnd)
+                .padding(horizontal = 12.dp)
+                .graphicsLayer {
+                    alpha = (0.35f + gesture.progress * 0.65f)
+                    scaleX = scale
+                    scaleY = scale
+                    val slide = (1f - gesture.progress) * 28.dp.toPx()
+                    translationX = if (back) -slide else slide
+                }
+                .size(44.dp)
+                .clip(RoundedCornerShape(percent = 50))
+                .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = if (back) {
+                    Icons.AutoMirrored.Rounded.ArrowBack
+                } else {
+                    Icons.AutoMirrored.Rounded.ArrowForward
+                },
+                contentDescription = if (back) "Go back" else "Go forward",
+                tint = if (committed) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                modifier = Modifier.size(22.dp),
+            )
+        }
     }
-    BackHandler(
-        enabled = viewModel.fullscreenView == null && !viewModel.isMediaFullscreen &&
-            !viewModel.isOmniboxFocused && viewModel.find.active,
-    ) {
-        viewModel.closeFind()
-    }
-    BackHandler(
-        enabled = viewModel.fullscreenView == null && !viewModel.isMediaFullscreen &&
-            !viewModel.isOmniboxFocused && !viewModel.find.active && viewModel.overlay != Overlay.NONE,
-    ) { viewModel.dismissOverlay() }
-    BackHandler(
-        enabled = viewModel.fullscreenView == null && !viewModel.isMediaFullscreen &&
-            !viewModel.isOmniboxFocused && !viewModel.find.active &&
-            viewModel.overlay == Overlay.NONE && viewModel.isImmersive,
-    ) { viewModel.exitImmersive() }
 }
 
 @Composable

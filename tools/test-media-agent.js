@@ -94,21 +94,91 @@ test('defeats the ancestor styles that crop a video into its box', async () => {
   }
 });
 
-test('covers the page behind the video and stops it scrolling', async () => {
-  const { win, doc } = createPage('<video id="v"></video><div id="junk">controls</div>');
+test('hides the page furniture instead of covering it with an overlay', async () => {
+  const { win, doc } = createPage(
+    '<div id="player"><video id="v"></video><div id="controls">tip menu</div></div>' +
+    '<div id="chat">chat</div>'
+  );
   describeVideo(doc.getElementById('v'), { width: 640, height: 360, paused: false });
 
   win.__slateMedia.command('enter', 'contain');
   await delay(ENTER_SETTLE_MS);
 
-  const backdrop = doc.querySelector('[data-slate-backdrop]');
-  assert.ok(backdrop, 'a backdrop hides the page furniture around the player');
-  assert.strictEqual(styleOf(backdrop, 'z-index'), '2147483646');
-  assert.ok(Number(styleOf(backdrop, 'z-index')) < Number(styleOf(doc.getElementById('v'), 'z-index')),
-    'the video must sit above the backdrop');
+  // Nothing of ours is painted on top: an opaque overlay can land in front of a hardware video
+  // surface, which is exactly the black-screen-with-audio failure.
+  assert.strictEqual(doc.querySelector('[data-slate-backdrop]'), null);
+
+  assert.strictEqual(styleOf(doc.getElementById('controls'), 'display'), 'none');
+  assert.strictEqual(styleOf(doc.getElementById('chat'), 'display'), 'none');
+  assert.strictEqual(styleOf(doc.getElementById('v'), 'display'), 'block', 'the video stays');
 
   const sheet = doc.querySelector('style[data-slate-theater]');
   assert.ok(sheet.textContent.includes('overflow:hidden'), 'the page must not scroll underneath');
+  assert.ok(sheet.textContent.includes('background:#000'), 'letterbox bars should be black');
+});
+
+test('prefers the stream that is making the sound over a bigger silent one', async () => {
+  // A large muted teaser next to the real stream is how a viewer ends up watching a black box
+  // while the audio plays on somewhere else.
+  const { win, doc } = createPage('<video id="teaser"></video><video id="stream"></video>');
+  const teaser = describeVideo(doc.getElementById('teaser'), { width: 1000, height: 600, paused: false });
+  teaser.muted = true;
+  const stream = describeVideo(doc.getElementById('stream'), { width: 320, height: 180, paused: false });
+  stream.muted = false;
+  stream.volume = 1;
+
+  win.__slateMedia.command('enter', 'contain');
+  await delay(ENTER_SETTLE_MS);
+
+  assert.strictEqual(styleOf(doc.getElementById('stream'), 'position'), 'fixed');
+  assert.strictEqual(styleOf(doc.getElementById('teaser'), 'position'), '');
+});
+
+test('ignores a video the page has hidden', async () => {
+  const { win, doc } = createPage(
+    '<video id="decoy" style="visibility:hidden"></video><video id="real"></video>'
+  );
+  describeVideo(doc.getElementById('decoy'), { width: 1200, height: 700, paused: false });
+  describeVideo(doc.getElementById('real'), { width: 320, height: 180, paused: false });
+
+  win.__slateMedia.command('enter', 'contain');
+  await delay(ENTER_SETTLE_MS);
+
+  assert.strictEqual(styleOf(doc.getElementById('real'), 'position'), 'fixed');
+});
+
+test('promotes a canvas the player draws the picture into', async () => {
+  // Some players decode into a canvas and keep the media element only for audio and timing.
+  const { win, doc } = createPage(
+    '<div id="player"><video id="v"></video><canvas id="c"></canvas></div>'
+  );
+  describeVideo(doc.getElementById('v'), { width: 640, height: 360, paused: false });
+  doc.getElementById('c').__rect = { width: 640, height: 360 };
+
+  win.__slateMedia.command('enter', 'contain');
+  await delay(ENTER_SETTLE_MS);
+
+  const canvas = doc.getElementById('c');
+  assert.strictEqual(styleOf(canvas, 'position'), 'fixed', 'the canvas is the picture');
+  assert.strictEqual(styleOf(canvas, 'object-fit'), 'contain', 'and must not be stretched');
+  assert.ok(
+    Number(styleOf(canvas, 'z-index')) >= Number(styleOf(doc.getElementById('v'), 'z-index')),
+    'the canvas has to sit on top of the media element'
+  );
+  assert.strictEqual(styleOf(canvas, 'display'), 'block', 'and must not be hidden as a sibling');
+});
+
+test('a canvas unrelated to the video is left alone', async () => {
+  const { win, doc } = createPage('<video id="v"></video><canvas id="ad"></canvas>');
+  describeVideo(doc.getElementById('v'), { width: 640, height: 360, paused: false });
+  doc.getElementById('ad').__rect = { width: 300, height: 250 };
+  // jsdom reports every rect at the origin, so overlap is decided by size alone here.
+  doc.getElementById('ad').__rect = { width: 10, height: 10 };
+
+  win.__slateMedia.command('enter', 'contain');
+  await delay(ENTER_SETTLE_MS);
+
+  assert.strictEqual(styleOf(doc.getElementById('ad'), 'position'), '');
 });
 
 test('hides the site player controls while fullscreen and restores them after', async () => {
@@ -146,9 +216,26 @@ test('exit puts every touched element back exactly as it was', async () => {
 
   assert.strictEqual(doc.getElementById('wrap').getAttribute('style'), before.wrap);
   assert.strictEqual(doc.getElementById('v').getAttribute('style'), before.v);
-  assert.strictEqual(doc.querySelector('[data-slate-backdrop]'), null);
+  assert.strictEqual(doc.getElementById('untouched').hasAttribute('style'), false);
   assert.strictEqual(doc.querySelector('style[data-slate-theater]'), null);
+  assert.strictEqual(doc.querySelector('[data-slate-keep]'), null, 'no markers left behind');
   assert.strictEqual(win.__slateMedia.isActive(), false);
+});
+
+test('hidden siblings are all restored on the way out', async () => {
+  const { win, doc } = createPage(
+    '<div id="wrap"><video id="v"></video><div id="a" style="color:red">a</div></div>' +
+    '<div id="b">b</div>'
+  );
+  describeVideo(doc.getElementById('v'), { width: 640, height: 360, paused: false });
+
+  win.__slateMedia.command('enter', 'contain');
+  await delay(ENTER_SETTLE_MS);
+  assert.strictEqual(styleOf(doc.getElementById('a'), 'display'), 'none');
+
+  win.__slateMedia.command('exit');
+  assert.strictEqual(doc.getElementById('a').getAttribute('style'), 'color:red');
+  assert.strictEqual(doc.getElementById('b').hasAttribute('style'), false);
 });
 
 test('an element with no inline style keeps having none', async () => {
@@ -355,8 +442,8 @@ test('exit unwinds both the frame and the video inside it', async () => {
 
   assert.strictEqual(frame.iframe.getAttribute('style'), frameStyleBefore);
   assert.strictEqual(frame.doc.getElementById('v').hasAttribute('style'), false);
-  assert.strictEqual(page.doc.querySelector('[data-slate-backdrop]'), null);
-  assert.strictEqual(frame.doc.querySelector('[data-slate-backdrop]'), null);
+  assert.strictEqual(page.doc.querySelector('style[data-slate-theater]'), null);
+  assert.strictEqual(frame.doc.querySelector('style[data-slate-theater]'), null);
 });
 
 test('playback commands reach the video inside the embedded player', async () => {

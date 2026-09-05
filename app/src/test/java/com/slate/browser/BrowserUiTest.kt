@@ -20,6 +20,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.slate.browser.data.AppDatabase
 import com.slate.browser.data.BrowserRepository
 import com.slate.browser.data.ThemeMode
+import com.slate.browser.BackAction
 import com.slate.browser.ui.BrowserScreen
 import com.slate.browser.ui.theme.SlateTheme
 import com.slate.browser.web.BrowserHost
@@ -326,6 +327,87 @@ class BrowserUiTest {
         compose.waitForIdle()
 
         assertSame("returning to a tab must reuse its webview", firstWebView, first.webView)
+    }
+
+    @Test
+    fun `back unwinds the layers in the order the user sees them`() {
+        render()
+        // A fresh launch has the omnibox open, so that is the first thing back should close.
+        assertEquals(BackAction.BLUR_OMNIBOX, viewModel.pendingBackAction())
+        assertTrue(viewModel.handleBack())
+
+        // With nothing open and no history, back belongs to the system: it leaves the browser
+        // rather than being swallowed.
+        assertEquals(BackAction.LEAVE_BROWSER, viewModel.pendingBackAction())
+        assertFalse(viewModel.handleBack())
+
+        viewModel.showOverlay(Overlay.HISTORY)
+        assertEquals(BackAction.DISMISS_OVERLAY, viewModel.pendingBackAction())
+        assertTrue(viewModel.handleBack())
+
+        viewModel.openFind()
+        assertEquals(BackAction.CLOSE_FIND, viewModel.pendingBackAction())
+        assertTrue(viewModel.handleBack())
+
+        viewModel.enterImmersive()
+        assertEquals(BackAction.EXIT_IMMERSIVE, viewModel.pendingBackAction())
+        assertTrue(viewModel.handleBack())
+    }
+
+    @Test
+    fun `page history is part of the back chain`() {
+        render()
+        viewModel.blurOmnibox()
+        viewModel.load("https://a.test")
+        compose.waitForIdle()
+        assertEquals(BackAction.LEAVE_BROWSER, viewModel.pendingBackAction())
+
+        // Once the page reports history, back navigates instead of closing the browser — the
+        // single most surprising thing a browser can get wrong.
+        viewModel.activeTab!!.canGoBack = true
+        compose.waitForIdle()
+        assertEquals(BackAction.GO_BACK, viewModel.pendingBackAction())
+    }
+
+    @Test
+    fun `fullscreen unwinds before anything else`() {
+        render()
+        viewModel.blurOmnibox()
+        viewModel.load("https://a.test")
+        compose.waitForIdle()
+        viewModel.activeTab!!.media = com.slate.browser.web.MediaState(
+            hasVideo = true, isPlaying = true, width = 1920, height = 1080,
+        )
+        viewModel.showOverlay(Overlay.NONE)
+        viewModel.enterMediaFullscreen()
+        compose.waitForIdle()
+
+        assertEquals(BackAction.EXIT_MEDIA_FULLSCREEN, viewModel.pendingBackAction())
+        assertTrue(viewModel.handleBack())
+        assertFalse(viewModel.isMediaFullscreen)
+    }
+
+    @Test
+    fun `desktop mode changes the user agent and is remembered for that tab`() {
+        render()
+        viewModel.blurOmnibox()
+        viewModel.load("https://example.com")
+        compose.waitForIdle()
+        val tab = viewModel.activeTab!!
+
+        viewModel.toggleDesktopMode()
+        compose.waitForIdle()
+        assertTrue(tab.isDesktopMode)
+        assertTrue(tab.webView!!.settings.userAgentString.contains("X11; Linux x86_64"))
+
+        // The preference travels with the tab, so a restored session comes back in the same mode.
+        val snapshot = viewModel.tabManager.snapshot()
+        assertTrue(snapshot.tabs.single { it.id == tab.id }.desktopMode)
+
+        viewModel.toggleDesktopMode()
+        compose.waitForIdle()
+        assertFalse(tab.isDesktopMode)
+        assertFalse(viewModel.tabManager.snapshot().tabs.single { it.id == tab.id }.desktopMode)
     }
 
     /** Records what the browser asked the platform to do, so nothing escapes to the device. */
