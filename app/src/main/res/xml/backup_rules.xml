@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Only what is worth carrying to a new device: favourites, history and preferences. Caches,
+  cookies and the open-tab session are deliberately left behind.
+-->
+<full-backup-content>
+    <include domain="database" path="slate.db" />
+    <include domain="sharedpref" path="." />
+    <include domain="file" path="datastore" />
+</full-backup-content>

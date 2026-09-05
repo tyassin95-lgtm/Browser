@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  A browser must be able to reach plain-http sites, so cleartext is permitted. This is the one
+  place where a browser's requirements differ from an ordinary app's: the user is shown an
+  unlocked indicator in the omnibox rather than having the request silently fail.
+
+  System certificate authorities only: user-installed CAs are not trusted, which keeps casual
+  interception off the table while leaving genuine enterprise MDM configuration untouched.
+-->
+<network-security-config xmlns:tools="http://schemas.android.com/tools">
+    <base-config cleartextTrafficPermitted="true" tools:ignore="InsecureBaseConfiguration">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
