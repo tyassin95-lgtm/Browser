@@ -5,7 +5,7 @@ for, and the smallest amount of chrome needed to get to the next one.
 
 ## Installing
 
-`dist/slate-browser-1.2.apk` is a signed release build. Copy it to the phone and open it;
+`dist/slate-browser-1.3.apk` is a signed release build. Copy it to the phone and open it;
 Android will ask you to allow installs from your file manager the first time. Minimum Android
 8.0 (API 26).
 
@@ -50,6 +50,15 @@ top — vertical space is the scarce resource sideways — and uses the extra wi
 forward and fullscreen controls. Rotating never reloads the page: the Activity handles the
 configuration change itself, so scroll position, form input, JavaScript state and playing video
 all survive.
+
+**Window layout.** The page and the chrome are siblings in a column, never stacked: a toolbar
+drawn over the page is how content becomes unreachable on a site that cannot scroll. Showing or
+hiding the toolbar is therefore a real resize, and it snaps rather than slides — animating the
+height would relayout the page on every frame, and a WebView reflow is far too expensive to do
+sixty times a second. System insets are split between the two so that together they cover every
+edge and neither sits under one, recomputed from whatever the device reports rather than from
+assumptions about where the bars are. The case that motivates it is a navigation bar that moves
+to the side in landscape, which otherwise puts the menu button underneath it.
 
 **Fullscreen browsing.** A landscape mode that hides the browser's chrome and the system bars
 so the page owns the entire screen, cutout included. Pull down from the top edge to leave; a
@@ -129,7 +138,7 @@ and it only accepts a call while the browser is genuinely waiting for one the us
 ## Tests
 
 ```
-./gradlew testDebugUnitTest    # 94 tests, Android framework via Robolectric
+./gradlew testDebugUnitTest    # 100 tests, Android framework via Robolectric
 cd tools && npm install && npm test   # 31 tests, the injected agent against a real DOM
 ```
 
@@ -150,6 +159,10 @@ state after two quick taps. From the media work: video ranking by area, which le
 preview outrank the small stream actually playing; a flat probe deadline, which expired before a
 player nested two frames deep could answer; and a rotation rule that read "dimensions not yet
 decoded" as landscape and turned the phone on a guess.
+
+`LayoutInsetsTest` dispatches real window insets into the composition and asserts on measured
+bounds, so "the page never sits under the toolbar" and "the menu button never sits under a side
+navigation bar" are checked as geometry rather than assumed.
 
 One environment limit worth naming: a Material3 text field inside a dialog never reports idle
 under Robolectric, so those few dialogs are covered at the ViewModel level instead of by driving

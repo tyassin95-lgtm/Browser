@@ -68,6 +68,17 @@ class MainActivity : ComponentActivity(), BrowserHost {
         enableEdgeToEdge()
         WindowCompat.setDecorFitsSystemWindows(window, false)
 
+        // The window always extends through the cutout, in every orientation, and the layout
+        // insets itself from what it finds. Switching this per mode used to letterbox landscape
+        // on cutout devices and changed the inset values underneath a running layout; keeping it
+        // fixed means one inset model has to be right rather than two.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
+
         viewModel.attach(this, this)
         viewModel.bootstrap(intent?.dataString?.takeIf { it.isNotBlank() })
 
@@ -150,16 +161,6 @@ class MainActivity : ComponentActivity(), BrowserHost {
             controller.hide(WindowInsetsCompat.Type.systemBars())
         } else {
             controller.show(WindowInsetsCompat.Type.systemBars())
-        }
-        // Cutouts are usable in fullscreen; in normal browsing the page stays clear of them.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            window.attributes = window.attributes.apply {
-                layoutInDisplayCutoutMode = if (hidden) {
-                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-                } else {
-                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT
-                }
-            }
         }
     }
 

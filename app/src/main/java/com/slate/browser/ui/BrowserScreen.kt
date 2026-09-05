@@ -6,10 +6,6 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -18,15 +14,16 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.navigationBars
-import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
@@ -48,7 +45,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -58,8 +54,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalConfiguration
-import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.slate.browser.BackAction
 import com.slate.browser.BrowserViewModel
@@ -74,14 +72,11 @@ import com.slate.browser.ui.components.LandscapeBar
 import com.slate.browser.ui.components.LoadingLine
 import com.slate.browser.ui.components.MediaFullscreenOverlay
 import com.slate.browser.ui.components.MediaOverlayMode
-import com.slate.browser.ui.components.MenuActions
-import com.slate.browser.ui.components.MenuSheet
 import com.slate.browser.ui.components.Omnibox
 import com.slate.browser.ui.components.PortraitBar
 import com.slate.browser.ui.components.SuggestionList
 import com.slate.browser.ui.components.WebViewHost
 import com.slate.browser.ui.theme.Motion
-import kotlin.math.roundToInt
 
 /**
  * The browsing surface: page, chrome, and every transient layer that can appear above them.
@@ -115,60 +110,66 @@ fun BrowserScreen(
         if (landscape) viewModel.enterImmersive() else viewModel.exitImmersive()
     }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    // Measured rather than assumed: the bar also carries whatever the system insets add.
-    var barHeightPx by remember { mutableFloatStateOf(0f) }
+
+    val density = LocalDensity.current
+    var chromeHeight by remember { mutableStateOf(0.dp) }
 
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
 
-        // ---- The page ------------------------------------------------------
-        Box(
-            Modifier
-                .fillMaxSize()
-                .then(
-                    if (immersive) Modifier
-                    else Modifier.windowInsetsPadding(WindowInsets.systemBars),
-                ),
-        ) {
-            WebViewHost(webView, Modifier.fillMaxSize())
-
-            tab?.errorMessage?.let { message ->
-                ErrorPanel(message = message, onRetry = viewModel::reload)
-            }
+        val omniboxSlot: @Composable (Modifier) -> Unit = { slotModifier ->
+            Omnibox(
+                url = tab?.url.orEmpty(),
+                text = viewModel.omniboxText,
+                focused = viewModel.isOmniboxFocused,
+                isBookmarked = viewModel.isCurrentBookmarked(),
+                compact = landscape,
+                onTextChange = viewModel::onOmniboxTextChanged,
+                onSubmit = viewModel::load,
+                onRequestFocus = { viewModel.focusOmnibox() },
+                onClear = { viewModel.onOmniboxTextChanged("") },
+                modifier = slotModifier,
+            )
         }
 
-        // ---- Chrome --------------------------------------------------------
-        if (!immersive) {
-            val barOffset by animateFloatAsState(
-                targetValue = if (chromeVisible) 0f else 1f,
-                animationSpec = tween(Motion.MEDIUM),
-                label = "chromeOffset",
-            )
+        /**
+         * The page and the chrome are siblings in a column, never stacked.
+         *
+         * Laying the toolbar over the page is how content ends up unreachable on a site that
+         * cannot scroll, so the page is given the space that is actually left instead. That
+         * makes showing or hiding the toolbar a real resize, which is why it snaps rather than
+         * slides: animating the height would relayout the page on every frame of the
+         * animation, and a WebView reflow is far too expensive to do sixty times a second.
+         *
+         * Insets are split between the two so that together they cover every system edge and
+         * neither sits under one. Which edge belongs to which depends on where the bar is, and
+         * on whether it is currently shown at all — when it is hidden the page inherits its
+         * edge as well. Nothing here assumes where the system bars are: a navigation bar on
+         * the side in landscape is the case that puts the menu button out of reach, and it is
+         * handled by the same expression as every other.
+         */
+        val pageSides = when {
+            !chromeVisible -> WindowInsetsSides.Horizontal + WindowInsetsSides.Vertical
+            landscape -> WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom
+            else -> WindowInsetsSides.Horizontal + WindowInsetsSides.Top
+        }
+        val barSides = if (landscape) {
+            WindowInsetsSides.Horizontal + WindowInsetsSides.Top
+        } else {
+            WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom
+        }
 
-            val omniboxSlot: @Composable (Modifier) -> Unit = { slotModifier ->
-                Omnibox(
-                    url = tab?.url.orEmpty(),
-                    text = viewModel.omniboxText,
-                    focused = viewModel.isOmniboxFocused,
-                    isBookmarked = viewModel.isCurrentBookmarked(),
-                    compact = landscape,
-                    onTextChange = viewModel::onOmniboxTextChanged,
-                    onSubmit = viewModel::load,
-                    onRequestFocus = { viewModel.focusOmnibox() },
-                    onClear = { viewModel.onOmniboxTextChanged("") },
-                    modifier = slotModifier,
-                )
-            }
-
-            if (landscape) {
-                Column(
-                    Modifier
-                        .align(Alignment.TopCenter)
-                        .fillMaxWidth()
-                        .onSizeChanged { barHeightPx = it.height.toFloat() }
-                        .offset { IntOffset(0, (-barOffset * barHeightPx).roundToInt()) }
-                        .background(MaterialTheme.colorScheme.surface)
-                        .windowInsetsPadding(WindowInsets.statusBars),
-                ) {
+        val chrome: @Composable () -> Unit = {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .testTag(CHROME_TAG)
+                    .background(MaterialTheme.colorScheme.surface)
+                    .onSizeChanged { size ->
+                        chromeHeight = with(density) { size.height.toDp() }
+                    }
+                    .windowInsetsPadding(systemChromeInsets().only(barSides)),
+            ) {
+                if (landscape) {
                     LandscapeBar(
                         urlSlot = omniboxSlot,
                         tabCount = viewModel.tabManager.count,
@@ -184,17 +185,7 @@ fun BrowserScreen(
                     )
                     LoadingLine(tab?.progress ?: 0f, tab?.isLoading == true)
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                }
-            } else {
-                Column(
-                    Modifier
-                        .align(Alignment.BottomCenter)
-                        .fillMaxWidth()
-                        .onSizeChanged { barHeightPx = it.height.toFloat() }
-                        .offset { IntOffset(0, (barOffset * barHeightPx).roundToInt()) }
-                        .background(MaterialTheme.colorScheme.surface)
-                        .windowInsetsPadding(WindowInsets.navigationBars),
-                ) {
+                } else {
                     LoadingLine(tab?.progress ?: 0f, tab?.isLoading == true)
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     PortraitBar(
@@ -210,6 +201,70 @@ fun BrowserScreen(
             }
         }
 
+        val page: @Composable (Modifier) -> Unit = { pageModifier ->
+            Box(
+                pageModifier.then(
+                    // Fullscreen browsing wants every pixel, cutout included.
+                    if (immersive) Modifier
+                    else Modifier.windowInsetsPadding(systemChromeInsets().only(pageSides)),
+                ),
+            ) {
+                // Tagged inside the insets: this is the area the page actually gets.
+                Box(Modifier.fillMaxSize().testTag(PAGE_TAG)) {
+                    WebViewHost(webView, Modifier.fillMaxSize())
+
+                    tab?.errorMessage?.let { message ->
+                        ErrorPanel(message = message, onRetry = viewModel::reload)
+                    }
+                }
+            }
+        }
+
+        if (immersive) {
+            page(Modifier.fillMaxSize())
+        } else {
+            Column(Modifier.fillMaxSize()) {
+                if (landscape && chromeVisible) chrome()
+                page(Modifier.fillMaxWidth().weight(1f))
+                // Find sits in the column too, so it displaces the page rather than covering it.
+                if (viewModel.find.active) {
+                    FindBar(
+                        state = viewModel.find,
+                        onQueryChange = viewModel::onFindQueryChanged,
+                        onNext = viewModel::findNext,
+                        onClose = viewModel::closeFind,
+                        modifier = Modifier
+                            .imePadding()
+                            .then(
+                                // The toolbar below already clears the navigation bar; without
+                                // one there, this bar has to clear it itself.
+                                if (!landscape && chromeVisible) {
+                                    Modifier
+                                } else {
+                                    Modifier.windowInsetsPadding(
+                                        systemChromeInsets().only(
+                                            WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom,
+                                        ),
+                                    )
+                                },
+                            ),
+                    )
+                }
+                if (!landscape && chromeVisible) chrome()
+            }
+        }
+
+        /**
+         * What already occupies the bottom edge, so floating layers can sit clear of it without
+         * counting the same inset twice: the measured toolbar height already includes whatever
+         * inset padding the toolbar took.
+         */
+        val bottomOccupied = when {
+            immersive -> 0.dp
+            !landscape && chromeVisible -> chromeHeight
+            else -> systemChromeInsets().asPaddingValues().calculateBottomPadding()
+        }
+
         // ---- Omnibox editing layer -----------------------------------------
         AnimatedVisibility(
             visible = viewModel.isOmniboxFocused,
@@ -219,6 +274,8 @@ fun BrowserScreen(
             OmniboxSheet(
                 suggestions = viewModel.suggestions,
                 landscape = landscape,
+                chromeHeight = chromeHeight,
+                bottomOccupied = bottomOccupied,
                 onPick = { suggestion ->
                     when (suggestion) {
                         is Suggestion.Search -> viewModel.load(suggestion.query)
@@ -226,22 +283,6 @@ fun BrowserScreen(
                     }
                 },
                 onDismiss = viewModel::blurOmnibox,
-            )
-        }
-
-        // ---- Find in page ---------------------------------------------------
-        AnimatedVisibility(
-            visible = viewModel.find.active,
-            modifier = Modifier.align(Alignment.BottomCenter),
-            enter = slideInVertically { it } + fadeIn(),
-            exit = slideOutVertically { it } + fadeOut(),
-        ) {
-            FindBar(
-                state = viewModel.find,
-                onQueryChange = viewModel::onFindQueryChanged,
-                onNext = viewModel::findNext,
-                onClose = viewModel::closeFind,
-                modifier = Modifier.navigationBarsPadding().imePadding(),
             )
         }
 
@@ -302,8 +343,8 @@ fun BrowserScreen(
             hostState = viewModel.snackbarHostState,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .navigationBarsPadding()
-                .padding(bottom = if (landscape) 16.dp else 68.dp, start = 12.dp, end = 12.dp),
+                .windowInsetsPadding(systemChromeInsets().only(WindowInsetsSides.Horizontal))
+                .padding(bottom = bottomOccupied + 12.dp, start = 12.dp, end = 12.dp),
         )
     }
 
@@ -377,6 +418,8 @@ private fun NavigationGestureAffordance(gesture: NavGesture, modifier: Modifier 
 private fun OmniboxSheet(
     suggestions: List<Suggestion>,
     landscape: Boolean,
+    chromeHeight: Dp,
+    bottomOccupied: Dp,
     onPick: (Suggestion) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -393,8 +436,14 @@ private fun OmniboxSheet(
             modifier = Modifier
                 .align(if (landscape) Alignment.TopCenter else Alignment.BottomCenter)
                 .fillMaxWidth()
-                .windowInsetsPadding(WindowInsets.systemBars)
-                .padding(bottom = if (landscape) 0.dp else BOTTOM_BAR_HEIGHT, top = if (landscape) TOP_BAR_HEIGHT else 0.dp)
+                // Only the horizontal insets here: the toolbar's own measured height already
+                // accounts for the edge it sits against, so applying that inset again would
+                // float the sheet a navigation bar's width away from the toolbar.
+                .windowInsetsPadding(systemChromeInsets().only(WindowInsetsSides.Horizontal))
+                .padding(
+                    top = if (landscape) chromeHeight else 0.dp,
+                    bottom = if (landscape) 0.dp else bottomOccupied,
+                )
                 .imePadding(),
             color = MaterialTheme.colorScheme.surface,
         ) {
@@ -485,6 +534,16 @@ private fun ErrorPanel(message: String, onRetry: () -> Unit) {
 /** A deliberate pull, not a stray touch near the top edge. */
 private val EXIT_DRAG_DISTANCE = 44.dp
 
-/** Chrome heights, shared by the bars themselves and by anything that must sit clear of them. */
-val BOTTOM_BAR_HEIGHT = 56.dp
-val TOP_BAR_HEIGHT = 48.dp
+/**
+ * Everything the system draws over: the status and navigation bars, plus the display cutout.
+ *
+ * The cutout matters because the window is laid out edge to edge through it, so a landscape
+ * cutout would otherwise clip whichever control sits at that end of the toolbar.
+ */
+/** Test handles for the two regions whose relationship the layout is built around. */
+const val PAGE_TAG = "slate:page"
+const val CHROME_TAG = "slate:chrome"
+
+@Composable
+private fun systemChromeInsets(): WindowInsets =
+    WindowInsets.systemBars.union(WindowInsets.displayCutout)

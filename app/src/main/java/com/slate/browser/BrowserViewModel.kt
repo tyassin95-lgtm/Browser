@@ -356,11 +356,6 @@ class BrowserViewModel @JvmOverloads constructor(
         activeTab?.webView?.stopLoading()
     }
 
-    fun goHome() {
-        val home = settings.value.homePage
-        if (home.isBlank()) focusOmnibox("") else load(home)
-    }
-
     /** Desktop mode is per tab and survives navigation within that tab. */
     /**
      * Desktop mode is per tab and survives navigation within that tab.

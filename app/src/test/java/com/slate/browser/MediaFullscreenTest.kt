@@ -76,8 +76,12 @@ class MediaFullscreenTest {
 
     @After
     fun tearDown() {
+        // Clearing the store cancels the ViewModel's scope; the database is only closed once
+        // that cancellation has actually run, or a query still unwinding reports a closed
+        // connection into whichever test happens to start next.
         viewModelStore.clear()
-        db.close()
+        repeat(5) { org.robolectric.shadows.ShadowLooper.idleMainLooper() }
+        runCatching { db.close() }
     }
 
     private fun render() {

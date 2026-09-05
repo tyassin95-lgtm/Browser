@@ -43,7 +43,6 @@ fun MenuSheetLayer(
             onBookmarks = { viewModel.showOverlay(Overlay.BOOKMARKS) },
             onHistory = { viewModel.showOverlay(Overlay.HISTORY) },
             onSettings = { viewModel.showOverlay(Overlay.SETTINGS) },
-            onHome = viewModel::goHome,
             onOpenExternally = onOpenExternally,
         ),
         sheetState = sheetState,

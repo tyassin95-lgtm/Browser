@@ -24,7 +24,6 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DesktopWindows
 import androidx.compose.material.icons.rounded.Fullscreen
 import androidx.compose.material.icons.rounded.History
-import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.PlayCircle
 import androidx.compose.material.icons.rounded.Refresh
@@ -70,7 +69,6 @@ data class MenuActions(
     val onBookmarks: () -> Unit,
     val onHistory: () -> Unit,
     val onSettings: () -> Unit,
-    val onHome: () -> Unit,
     val onOpenExternally: () -> Unit,
 )
 
@@ -145,7 +143,6 @@ fun MenuSheet(
 
             MenuRow(Icons.Rounded.Star, "Favourites") { onDismiss(); actions.onBookmarks() }
             MenuRow(Icons.Rounded.History, "History") { onDismiss(); actions.onHistory() }
-            MenuRow(Icons.Rounded.Home, "Home") { onDismiss(); actions.onHome() }
             MenuRow(Icons.AutoMirrored.Rounded.OpenInNew, "Open in another app") {
                 onDismiss(); actions.onOpenExternally()
             }

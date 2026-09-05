@@ -87,8 +87,12 @@ class SettingsScreenTest {
 
     @After
     fun tearDown() {
+        // Clearing the store cancels the ViewModel's scope; the database is only closed once
+        // that cancellation has actually run, or a query still unwinding reports a closed
+        // connection into whichever test happens to start next.
         viewModelStore.clear()
-        db.close()
+        repeat(5) { org.robolectric.shadows.ShadowLooper.idleMainLooper() }
+        runCatching { db.close() }
     }
 
     private fun settle() {
@@ -151,7 +155,7 @@ class SettingsScreenTest {
     }
 
     @Test
-    fun `the home page is stored and is what Home navigates to`() {
+    fun `the home page is stored and is what a new tab opens`() {
         // The dialog itself is not driven here: a Material3 text field never reports idle under
         // Robolectric, so the flow is covered where the behaviour actually lives.
         viewModel.setHomePage("example.com")
@@ -159,7 +163,7 @@ class SettingsScreenTest {
         assertTrue(viewModel.settings.value.homePage == "example.com")
 
         viewModel.dismissOverlay()
-        viewModel.goHome()
+        viewModel.newTab()
         settle()
         assertTrue(viewModel.activeTab?.url?.contains("example.com") == true)
     }
