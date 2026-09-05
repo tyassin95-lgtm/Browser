@@ -39,7 +39,7 @@ fun MenuSheetLayer(
             onFind = viewModel::openFind,
             onToggleDesktop = viewModel::toggleDesktopMode,
             onImmersive = viewModel::enterImmersive,
-            onMediaFullscreen = viewModel::requestMediaFullscreen,
+            onMediaFullscreen = viewModel::enterMediaFullscreen,
             onBookmarks = { viewModel.showOverlay(Overlay.BOOKMARKS) },
             onHistory = { viewModel.showOverlay(Overlay.HISTORY) },
             onSettings = { viewModel.showOverlay(Overlay.SETTINGS) },

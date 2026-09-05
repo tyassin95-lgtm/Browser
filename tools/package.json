@@ -1,0 +1,8 @@
+{
+  "name": "slate-media-agent-tests",
+  "private": true,
+  "version": "1.0.0",
+  "description": "DOM-level tests for the in-page media agent, run outside Gradle so the Android build needs no Node toolchain.",
+  "scripts": { "test": "node test-media-agent.js" },
+  "devDependencies": { "jsdom": "^25.0.0" }
+}

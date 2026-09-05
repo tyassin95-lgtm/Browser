@@ -9,6 +9,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.slate.browser.util.UrlUtils
+import com.slate.browser.web.MediaState
 import java.util.UUID
 
 /**
@@ -43,6 +44,10 @@ class Tab(
         internal set
     var errorMessage by mutableStateOf<String?>(null)
         internal set
+    /** What this tab is playing, reported by the in-page media agent. */
+    var media by mutableStateOf(MediaState.NONE)
+        internal set
+
     /** A page snapshot for the tab switcher, refreshed lazily when the tab is left. */
     var thumbnail by mutableStateOf<Bitmap?>(null)
         internal set

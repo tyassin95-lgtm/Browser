@@ -2,6 +2,7 @@ package com.slate.browser
 
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -78,9 +79,20 @@ class MainActivity : ComponentActivity(), BrowserHost {
             val hideSystemBars = viewModel.isImmersive || viewModel.fullscreenView != null
             LaunchedEffect(hideSystemBars) { applySystemBars(hideSystemBars) }
 
+            // A wide stream is worth turning the phone for: landscape is where a 16:9 video
+            // stops being a letterboxed strip and starts using the whole display. The lock is
+            // released the moment fullscreen ends, so normal browsing still follows the sensor.
+            LaunchedEffect(viewModel.lockLandscapeForMedia) {
+                requestedOrientation = if (viewModel.lockLandscapeForMedia) {
+                    ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                } else {
+                    ActivityInfo.SCREEN_ORIENTATION_FULL_USER
+                }
+            }
+
             // Media should not be interrupted by the screen timing out.
-            LaunchedEffect(viewModel.fullscreenView != null) {
-                if (viewModel.fullscreenView != null) {
+            LaunchedEffect(viewModel.fullscreenView != null || viewModel.isMediaFullscreen) {
+                if (viewModel.fullscreenView != null || viewModel.isMediaFullscreen) {
                     window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 } else {
                     window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)

@@ -130,7 +130,7 @@ fun MenuSheet(
                 if (actions.isDesktopMode) Icons.Rounded.PhoneAndroid else Icons.Rounded.DesktopWindows,
                 if (actions.isDesktopMode) "Mobile site" else "Desktop site",
             ) { onDismiss(); actions.onToggleDesktop() }
-            MenuRow(Icons.Rounded.PlayCircle, "Play video fullscreen") {
+            MenuRow(Icons.Rounded.PlayCircle, "Watch video fullscreen") {
                 onDismiss(); actions.onMediaFullscreen()
             }
             if (actions.showImmersive) {

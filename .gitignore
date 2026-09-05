@@ -12,3 +12,5 @@ local.properties
 
 # Local SDK location; the APK in dist/ is deliberately tracked as the deliverable.
 local.properties
+tools/node_modules/
+.kotlin/

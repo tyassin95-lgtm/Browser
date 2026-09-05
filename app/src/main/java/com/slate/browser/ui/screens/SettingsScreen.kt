@@ -97,6 +97,12 @@ fun SettingsScreen(
                 settings.allowAutoplay,
             ) { onToggle(SettingToggle.AUTOPLAY, it) }
 
+            ToggleRow(
+                "Turn sideways for video",
+                "Fullscreen video rotates the display to landscape when the stream is wider than it is tall.",
+                settings.rotateForVideo,
+            ) { onToggle(SettingToggle.ROTATE_FOR_VIDEO, it) }
+
             SectionLabel("Privacy")
             ToggleRow(
                 "Save history",
@@ -191,7 +197,7 @@ fun SettingsScreen(
 }
 
 enum class SettingToggle {
-    JAVASCRIPT, DESKTOP_DEFAULT, BLOCK_3P_COOKIES, DNT, AUTOPLAY,
+    JAVASCRIPT, DESKTOP_DEFAULT, BLOCK_3P_COOKIES, DNT, AUTOPLAY, ROTATE_FOR_VIDEO,
     RESTORE_TABS, SAVE_HISTORY, AUTO_IMMERSIVE, HIDE_ON_SCROLL, CLEAR_ON_EXIT,
 }
 

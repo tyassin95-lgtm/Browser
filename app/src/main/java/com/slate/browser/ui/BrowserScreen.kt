@@ -58,10 +58,13 @@ import androidx.compose.ui.unit.dp
 import com.slate.browser.BrowserViewModel
 import com.slate.browser.Overlay
 import com.slate.browser.data.Suggestion
+import com.slate.browser.web.MediaFit
 import com.slate.browser.ui.components.FindBar
 import com.slate.browser.ui.components.FullscreenHost
 import com.slate.browser.ui.components.LandscapeBar
 import com.slate.browser.ui.components.LoadingLine
+import com.slate.browser.ui.components.MediaFullscreenOverlay
+import com.slate.browser.ui.components.MediaOverlayMode
 import com.slate.browser.ui.components.MenuActions
 import com.slate.browser.ui.components.MenuSheet
 import com.slate.browser.ui.components.Omnibox
@@ -91,6 +94,7 @@ fun BrowserScreen(
     // Reading tab.webView subscribes to it, so hibernating or waking a tab re-hosts the page.
     val webView = tab?.let { it.webView ?: viewModel.tabManager.webViewFor(it) }
     val immersive = viewModel.isImmersive
+    val mediaFullscreen = viewModel.isMediaFullscreen
     val chromeVisible = viewModel.chromeVisible && !immersive
     val settings by viewModel.settings.collectAsState()
     var menuOpen by remember { mutableStateOf(false) }
@@ -164,6 +168,8 @@ fun BrowserScreen(
                         onBack = { viewModel.goBack() },
                         onForward = viewModel::goForward,
                         onImmersive = viewModel::enterImmersive,
+                        showMedia = viewModel.hasPlayableMedia,
+                        onMedia = viewModel::enterMediaFullscreen,
                         onTabs = { viewModel.showOverlay(Overlay.TABS) },
                         onMenu = { menuOpen = true },
                     )
@@ -185,6 +191,8 @@ fun BrowserScreen(
                     PortraitBar(
                         urlSlot = omniboxSlot,
                         tabCount = viewModel.tabManager.count,
+                        showMedia = viewModel.hasPlayableMedia,
+                        onMedia = viewModel::enterMediaFullscreen,
                         onTabs = { viewModel.showOverlay(Overlay.TABS) },
                         onMenu = { menuOpen = true },
                         onSwipeTab = { direction -> viewModel.stepTab(direction) },
@@ -229,8 +237,24 @@ fun BrowserScreen(
         }
 
         // ---- Immersive affordances -----------------------------------------
-        if (immersive) {
+        if (immersive && !mediaFullscreen) {
             ImmersiveExitAffordance(onExit = viewModel::exitImmersive)
+        }
+
+        // ---- Browser-owned video fullscreen --------------------------------
+        if (mediaFullscreen && viewModel.fullscreenView == null) {
+            MediaFullscreenOverlay(
+                mode = MediaOverlayMode.BROWSER,
+                isPlaying = viewModel.media.isPlaying,
+                isMuted = viewModel.media.isMuted,
+                isLive = viewModel.media.isLive,
+                isFilling = viewModel.mediaFit == MediaFit.COVER,
+                showFitControl = true,
+                onExit = viewModel::exitMediaFullscreen,
+                onTogglePlay = viewModel::toggleMediaPlayback,
+                onToggleMute = viewModel::toggleMediaMute,
+                onToggleFit = viewModel::toggleMediaFit,
+            )
         }
 
         // ---- Overlays --------------------------------------------------------
@@ -239,6 +263,20 @@ fun BrowserScreen(
         // ---- A page element asked for the whole screen ------------------------
         viewModel.fullscreenView?.let { view ->
             FullscreenHost(view, Modifier.fillMaxSize())
+            // A page that opened its own fullscreen still gets the browser's exit gestures, so
+            // recovery never depends on the site drawing a working close button.
+            MediaFullscreenOverlay(
+                mode = MediaOverlayMode.PAGE,
+                isPlaying = viewModel.media.isPlaying,
+                isMuted = viewModel.media.isMuted,
+                isLive = viewModel.media.isLive,
+                isFilling = false,
+                showFitControl = false,
+                onExit = viewModel::onExitElementFullscreen,
+                onTogglePlay = viewModel::toggleMediaPlayback,
+                onToggleMute = viewModel::toggleMediaMute,
+                onToggleFit = {},
+            )
         }
 
         // ---- Dialogs ---------------------------------------------------------
@@ -266,19 +304,29 @@ fun BrowserScreen(
     // ---- Back handling ----------------------------------------------------
     // Each layer consumes back in the order the user perceives them.
     BackHandler(enabled = viewModel.fullscreenView != null) { viewModel.onExitElementFullscreen() }
-    BackHandler(enabled = viewModel.fullscreenView == null && viewModel.isOmniboxFocused) {
+    BackHandler(enabled = viewModel.fullscreenView == null && viewModel.isMediaFullscreen) {
+        viewModel.exitMediaFullscreen()
+    }
+    BackHandler(
+        enabled = viewModel.fullscreenView == null && !viewModel.isMediaFullscreen &&
+            viewModel.isOmniboxFocused,
+    ) {
         viewModel.blurOmnibox()
     }
-    BackHandler(enabled = viewModel.fullscreenView == null && !viewModel.isOmniboxFocused && viewModel.find.active) {
+    BackHandler(
+        enabled = viewModel.fullscreenView == null && !viewModel.isMediaFullscreen &&
+            !viewModel.isOmniboxFocused && viewModel.find.active,
+    ) {
         viewModel.closeFind()
     }
     BackHandler(
-        enabled = viewModel.fullscreenView == null && !viewModel.isOmniboxFocused &&
-            !viewModel.find.active && viewModel.overlay != Overlay.NONE,
+        enabled = viewModel.fullscreenView == null && !viewModel.isMediaFullscreen &&
+            !viewModel.isOmniboxFocused && !viewModel.find.active && viewModel.overlay != Overlay.NONE,
     ) { viewModel.dismissOverlay() }
     BackHandler(
-        enabled = viewModel.fullscreenView == null && !viewModel.isOmniboxFocused &&
-            !viewModel.find.active && viewModel.overlay == Overlay.NONE && viewModel.isImmersive,
+        enabled = viewModel.fullscreenView == null && !viewModel.isMediaFullscreen &&
+            !viewModel.isOmniboxFocused && !viewModel.find.active &&
+            viewModel.overlay == Overlay.NONE && viewModel.isImmersive,
     ) { viewModel.exitImmersive() }
 }
 

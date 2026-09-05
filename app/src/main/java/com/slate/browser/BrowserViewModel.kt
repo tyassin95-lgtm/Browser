@@ -35,6 +35,9 @@ import com.slate.browser.util.UrlUtils
 import com.slate.browser.web.BrowserHost
 import com.slate.browser.web.DownloadCoordinator
 import com.slate.browser.web.FaviconStore
+import com.slate.browser.web.MediaAgent
+import com.slate.browser.web.MediaFit
+import com.slate.browser.web.MediaState
 import com.slate.browser.web.JsDialogRequest
 import com.slate.browser.web.SitePermissionRequest
 import com.slate.browser.web.SlateWebChromeClient
@@ -67,6 +70,7 @@ class BrowserViewModel @JvmOverloads constructor(
 ) : AndroidViewModel(app) {
 
     val faviconStore = FaviconStore(app, viewModelScope)
+    private val mediaAgent = MediaAgent(app)
     val snackbarHostState = SnackbarHostState()
     val repo: BrowserRepository get() = repository
     val store: SettingsStore get() = settingsStore
@@ -103,6 +107,15 @@ class BrowserViewModel @JvmOverloads constructor(
     var suggestions by mutableStateOf<List<Suggestion>>(emptyList())
         private set
     var isImmersive by mutableStateOf(false)
+        private set
+
+    /** The browser's own fullscreen video presentation, independent of the page's player. */
+    var isMediaFullscreen by mutableStateOf(false)
+        private set
+    var mediaFit by mutableStateOf(MediaFit.CONTAIN)
+        private set
+    /** True while a landscape stream should hold the display sideways. */
+    var lockLandscapeForMedia by mutableStateOf(false)
         private set
     var chromeVisible by mutableStateOf(true)
         private set
@@ -173,6 +186,7 @@ class BrowserViewModel @JvmOverloads constructor(
     // ---- Navigation ---------------------------------------------------------
 
     fun newTab(url: String? = null, focusOmnibox: Boolean = url == null) {
+        exitMediaFullscreen()
         captureThumbnail(activeTab)
         val home = url ?: settings.value.homePage.takeIf { it.isNotBlank() }
         tabManager.openTab(home, desktopMode = settings.value.desktopModeByDefault)
@@ -181,6 +195,7 @@ class BrowserViewModel @JvmOverloads constructor(
     }
 
     fun openInNewTab(url: String) {
+        exitMediaFullscreen()
         captureThumbnail(activeTab)
         tabManager.openTab(url, desktopMode = settings.value.desktopModeByDefault)
         overlay = Overlay.NONE
@@ -193,6 +208,7 @@ class BrowserViewModel @JvmOverloads constructor(
     }
 
     fun selectTab(id: String) {
+        exitMediaFullscreen()
         captureThumbnail(activeTab)
         tabManager.select(id)
         overlay = Overlay.NONE
@@ -225,6 +241,8 @@ class BrowserViewModel @JvmOverloads constructor(
         val tab = activeTab ?: tabManager.openTab()
         val url = UrlUtils.toLoadableUrl(input, settings.value.searchEngine)
         if (url.isBlank()) return
+        exitMediaFullscreen()
+        tab.media = MediaState.NONE
         tab.errorMessage = null
         // Show the destination straight away rather than leaving the previous page's address
         // in the omnibox until the network answers. onPageStarted corrects it on any redirect.
@@ -336,6 +354,10 @@ class BrowserViewModel @JvmOverloads constructor(
     }
 
     fun exitImmersive() {
+        if (isMediaFullscreen) {
+            exitMediaFullscreen()
+            return
+        }
         isImmersive = false
         chromeVisible = true
     }
@@ -356,13 +378,83 @@ class BrowserViewModel @JvmOverloads constructor(
         fullscreenCallback = null
     }
 
-    /** Asks the page to put its primary video into fullscreen, from the browser's own UI. */
-    fun requestMediaFullscreen() {
-        val webView = activeTab?.webView ?: return
-        webView.evaluateJavascript(REQUEST_VIDEO_FULLSCREEN) { result ->
-            if (result == null || result == "false" || result == "\"false\"") {
-                snack("No video found on this page")
-            }
+    // ---- Browser-owned media fullscreen -------------------------------------
+
+    val media: MediaState get() = activeTab?.media ?: MediaState.NONE
+
+    /** True when there is something worth offering a fullscreen button for. */
+    val hasPlayableMedia: Boolean get() = media.hasVideo
+
+    /**
+     * Presents the page's main video full screen using the browser's own machinery rather than
+     * the page's. Nothing here depends on the site exposing a fullscreen control, on its player
+     * supporting one, or on an embedding iframe being marked `allowfullscreen`.
+     */
+    fun enterMediaFullscreen() {
+        val tab = activeTab ?: return
+        val webView = tab.webView ?: return
+        if (!tab.media.hasVideo) {
+            mediaAgent.scan(webView)
+            snack("No video playing on this page")
+            return
+        }
+        overlay = Overlay.NONE
+        blurOmnibox()
+        closeFind()
+        isMediaFullscreen = true
+        isImmersive = true
+        lockLandscapeForMedia = shouldHoldLandscape(tab.media)
+        // Asking for fullscreen *is* the user gesture. Without this the overlay's play button
+        // would be silently refused on pages that have not been touched yet, because a script
+        // driven call does not carry gesture provenance of its own.
+        webView.settings.mediaPlaybackRequiresUserGesture = false
+        mediaAgent.enterFullscreen(webView, mediaFit)
+    }
+
+    fun exitMediaFullscreen() {
+        if (!isMediaFullscreen) return
+        isMediaFullscreen = false
+        isImmersive = false
+        lockLandscapeForMedia = false
+        chromeVisible = true
+        activeTab?.webView?.let { webView ->
+            mediaAgent.exitFullscreen(webView)
+            webView.settings.mediaPlaybackRequiresUserGesture = !settings.value.allowAutoplay
+        }
+    }
+
+    fun toggleMediaFullscreen() {
+        if (isMediaFullscreen) exitMediaFullscreen() else enterMediaFullscreen()
+    }
+
+    /** Switches between letterboxing the stream and filling the display with it. */
+    fun toggleMediaFit() {
+        mediaFit = mediaFit.toggled()
+        activeTab?.webView?.let { mediaAgent.setFit(it, mediaFit) }
+        snack(if (mediaFit == MediaFit.COVER) "Filling the screen" else "Fitting the whole frame")
+    }
+
+    fun toggleMediaPlayback() {
+        activeTab?.webView?.let { mediaAgent.togglePlayback(it) }
+    }
+
+    fun toggleMediaMute() {
+        activeTab?.webView?.let { mediaAgent.toggleMute(it) }
+    }
+
+    /**
+     * Only a stream we know to be wider than it is tall earns the rotation. A live stream often
+     * reports no dimensions until its first frame decodes, and turning the phone on a guess —
+     * then turning it back a moment later — is worse than waiting for that frame.
+     */
+    internal fun shouldHoldLandscape(state: MediaState): Boolean =
+        settings.value.rotateForVideo && state.prefersLandscape
+
+    internal fun onMediaState(tab: Tab, state: MediaState) {
+        tab.media = state
+        // A stream whose dimensions only arrive after playback starts still gets the rotation.
+        if (isMediaFullscreen && tab.id == tabManager.activeTabId) {
+            lockLandscapeForMedia = shouldHoldLandscape(state)
         }
     }
 
@@ -495,6 +587,10 @@ class BrowserViewModel @JvmOverloads constructor(
                 SettingToggle.BLOCK_3P_COOKIES -> settingsStore.setBlockThirdPartyCookies(value)
                 SettingToggle.DNT -> settingsStore.setDoNotTrack(value)
                 SettingToggle.AUTOPLAY -> settingsStore.setAutoplay(value)
+                SettingToggle.ROTATE_FOR_VIDEO -> {
+                    settingsStore.setRotateForVideo(value)
+                    if (!value) lockLandscapeForMedia = false
+                }
                 SettingToggle.RESTORE_TABS -> {
                     settingsStore.setRestoreTabs(value)
                     if (!value) persistence.clear()
@@ -588,6 +684,9 @@ class BrowserViewModel @JvmOverloads constructor(
                 target.isLoading = true
                 target.errorMessage = null
                 target.progress = 0.02f
+                // A new document has no media until its agent says otherwise.
+                target.media = MediaState.NONE
+                if (target.id == tabManager.activeTabId) exitMediaFullscreen()
             },
             pageFinished = { target, url, title ->
                 target.url = url
@@ -596,6 +695,7 @@ class BrowserViewModel @JvmOverloads constructor(
                 target.progress = 1f
                 target.canGoBack = target.webView?.canGoBack() == true
                 target.canGoForward = target.webView?.canGoForward() == true
+                target.webView?.let { mediaAgent.injectIntoMainFrame(it) }
                 if (settings.value.saveHistory && target.errorMessage == null) {
                     viewModelScope.launch { repository.recordVisit(url, title) }
                 }
@@ -633,6 +733,20 @@ class BrowserViewModel @JvmOverloads constructor(
             }
         }
         downloads?.let { webView.addJavascriptInterface(it.JsBridge(), "SlateDownload") }
+
+        mediaAgent.install(webView)
+        webView.addJavascriptInterface(
+            mediaAgent.Bridge(
+                onState = { state -> onMediaState(tab, state) },
+                onEnterResult = { success ->
+                    if (!success && isMediaFullscreen) {
+                        exitMediaFullscreen()
+                        snack("Couldn't make this video fullscreen")
+                    }
+                },
+            ),
+            "SlateMedia",
+        )
 
         webView.setFindListener { activeIndex, numberOfMatches, isDoneCounting ->
             if (isDoneCounting) {
@@ -727,25 +841,5 @@ class BrowserViewModel @JvmOverloads constructor(
         const val SCROLL_SHOW_THRESHOLD = 8
         const val SCROLL_TOP_SLOP = 24
         const val THUMBNAIL_WIDTH = 360
-
-        /**
-         * Fullscreen must be triggered from inside the page: the Fullscreen API refuses calls
-         * that are not user-activated, and only the page can nominate the right element.
-         */
-        const val REQUEST_VIDEO_FULLSCREEN = """
-            (function() {
-              var best = null, bestArea = 0;
-              document.querySelectorAll('video').forEach(function(v) {
-                var r = v.getBoundingClientRect();
-                var area = r.width * r.height;
-                if (area > bestArea) { bestArea = area; best = v; }
-              });
-              if (!best) return false;
-              var fn = best.requestFullscreen || best.webkitRequestFullscreen ||
-                       best.webkitEnterFullscreen;
-              if (!fn) return false;
-              try { fn.call(best); return true; } catch (e) { return false; }
-            })();
-        """
     }
 }

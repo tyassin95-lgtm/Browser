@@ -1,7 +1,12 @@
 package com.slate.browser.ui.components
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -21,6 +26,7 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.ArrowForward
 import androidx.compose.material.icons.rounded.Fullscreen
 import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.rounded.Movie
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
@@ -95,6 +101,22 @@ fun TabCounter(count: Int, onClick: () -> Unit, modifier: Modifier = Modifier) {
 }
 
 /**
+ * Appears only while the page has a video worth watching, which keeps the toolbar as spare as
+ * it always was on pages that have none. It is the primary way into fullscreen video, and it is
+ * present whether or not the site's own player offers one.
+ */
+@Composable
+private fun MediaButton(visible: Boolean, onClick: () -> Unit) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(tween(Motion.MEDIUM)) + scaleIn(tween(Motion.MEDIUM), initialScale = 0.7f),
+        exit = fadeOut(tween(Motion.FAST)) + scaleOut(tween(Motion.FAST), targetScale = 0.7f),
+    ) {
+        BarButton(Icons.Rounded.Movie, "Watch fullscreen", onClick = onClick)
+    }
+}
+
+/**
  * Portrait chrome sits at the bottom, where thumbs are. A horizontal drag across the bar moves
  * between tabs, which is faster than opening the switcher for the common two-tab case.
  */
@@ -102,6 +124,8 @@ fun TabCounter(count: Int, onClick: () -> Unit, modifier: Modifier = Modifier) {
 fun PortraitBar(
     urlSlot: @Composable (Modifier) -> Unit,
     tabCount: Int,
+    showMedia: Boolean,
+    onMedia: () -> Unit,
     onTabs: () -> Unit,
     onMenu: () -> Unit,
     onSwipeTab: (Int) -> Unit,
@@ -127,6 +151,7 @@ fun PortraitBar(
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         urlSlot(Modifier.weight(1f))
+        MediaButton(visible = showMedia, onClick = onMedia)
         TabCounter(tabCount, onTabs)
         BarButton(Icons.Rounded.MoreVert, "Menu", onClick = onMenu)
     }
@@ -145,6 +170,8 @@ fun LandscapeBar(
     onBack: () -> Unit,
     onForward: () -> Unit,
     onImmersive: () -> Unit,
+    showMedia: Boolean,
+    onMedia: () -> Unit,
     onTabs: () -> Unit,
     onMenu: () -> Unit,
     modifier: Modifier = Modifier,
@@ -162,6 +189,7 @@ fun LandscapeBar(
         Spacer(Modifier.width(4.dp))
         urlSlot(Modifier.weight(1f))
         Spacer(Modifier.width(4.dp))
+        MediaButton(visible = showMedia, onClick = onMedia)
         BarButton(Icons.Rounded.Fullscreen, "Fullscreen browsing", onClick = onImmersive)
         TabCounter(tabCount, onTabs)
         BarButton(Icons.Rounded.MoreVert, "Menu", onClick = onMenu)

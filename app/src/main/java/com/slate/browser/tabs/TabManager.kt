@@ -9,6 +9,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateList
+import com.slate.browser.web.MediaState
 
 /**
  * Owns the set of open tabs and, crucially, decides which of them get a live [WebView].
@@ -170,6 +171,8 @@ class TabManager(
             tab.pendingUrl = tab.url
         }
         tab.webView = null
+        // The document is gone, so whatever it was playing is gone with it.
+        tab.media = MediaState.NONE
         teardown(webView)
     }
 
@@ -182,6 +185,7 @@ class TabManager(
         val webView = tab.webView ?: return
         tab.webView = null
         tab.savedState = null
+        tab.media = MediaState.NONE
         teardown(webView)
     }
 
