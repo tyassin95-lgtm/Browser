@@ -211,7 +211,11 @@ fun BrowserScreen(
             ) {
                 // Tagged inside the insets: this is the area the page actually gets.
                 Box(Modifier.fillMaxSize().testTag(PAGE_TAG)) {
-                    WebViewHost(webView, Modifier.fillMaxSize())
+                    WebViewHost(
+                        webView = webView,
+                        backgroundColor = MaterialTheme.colorScheme.background,
+                        modifier = Modifier.fillMaxSize(),
+                    )
 
                     tab?.errorMessage?.let { message ->
                         ErrorPanel(message = message, onRetry = viewModel::reload)

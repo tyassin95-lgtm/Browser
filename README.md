@@ -5,7 +5,7 @@ for, and the smallest amount of chrome needed to get to the next one.
 
 ## Installing
 
-`dist/slate-browser-1.3.apk` is a signed release build. Copy it to the phone and open it;
+`dist/slate-browser-1.4.apk` is a signed release build. Copy it to the phone and open it;
 Android will ask you to allow installs from your file manager the first time. Minimum Android
 8.0 (API 26).
 
@@ -59,6 +59,16 @@ sixty times a second. System insets are split between the two so that together t
 edge and neither sits under one, recomputed from whatever the device reports rather than from
 assumptions about where the bars are. The case that motivates it is a navigation bar that moves
 to the side in landscape, which otherwise puts the menu button underneath it.
+
+Because moving the toolbar resizes the page, the decision to move it is deliberately reluctant
+and is never acted on while the page is moving. Travel is accumulated in one direction and
+discarded on reversal, distances are in dp so a 4x panel is not four times more sensitive, a
+frame too large to have come from a finger is ignored — that is the signature of the browser's
+own resize, and acting on it closes a loop of resize, scroll, resize — and the change itself
+waits for scrolling to stop. One resize on a still page is invisible; the same resize under a
+live compositor is what tears, and doing it every frame tears continuously. The page and the
+WebView are both painted opaque so the compositor is handed a finished layer rather than
+blending one, and no gap can expose the previous frame.
 
 **Fullscreen browsing.** A landscape mode that hides the browser's chrome and the system bars
 so the page owns the entire screen, cutout included. Pull down from the top edge to leave; a
@@ -138,7 +148,7 @@ and it only accepts a call while the browser is genuinely waiting for one the us
 ## Tests
 
 ```
-./gradlew testDebugUnitTest    # 100 tests, Android framework via Robolectric
+./gradlew testDebugUnitTest    # 118 tests, Android framework via Robolectric
 cd tools && npm install && npm test   # 31 tests, the injected agent against a real DOM
 ```
 
@@ -160,7 +170,10 @@ preview outrank the small stream actually playing; a flat probe deadline, which 
 player nested two frames deep could answer; and a rotation rule that read "dimensions not yet
 decoded" as landscape and turned the phone on a guess.
 
-`LayoutInsetsTest` dispatches real window insets into the composition and asserts on measured
+`ScrollRenderingTest` feeds real scroll streams — flings, repeated swipes, jitter — and counts
+how many times the layout would be resized; the answer has to be zero during the scroll and one
+after it. Those tests were checked against the previous implementation first, where four of them
+fail. `LayoutInsetsTest` dispatches real window insets into the composition and asserts on measured
 bounds, so "the page never sits under the toolbar" and "the menu button never sits under a side
 navigation bar" are checked as geometry rather than assumed.
 

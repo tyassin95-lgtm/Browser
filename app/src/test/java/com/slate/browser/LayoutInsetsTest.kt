@@ -180,7 +180,15 @@ class LayoutInsetsTest {
         applyInsets(top = 48, bottom = 60)
         val withChrome = pageBounds()
 
-        viewModel.onPageScrolled(delta = 200, scrollY = 400)
+        // Scrolling decides the toolbar should go; the move itself lands once the page has
+        // stopped, so the test has to let that settle just as a real scroll would.
+        var y = 0
+        repeat(10) {
+            y += 60
+            viewModel.onPageScrolled(delta = 60, scrollY = y)
+        }
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(400))
         compose.waitForIdle()
         val withoutChrome = pageBounds()
 

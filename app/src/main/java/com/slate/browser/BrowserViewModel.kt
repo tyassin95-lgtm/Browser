@@ -31,6 +31,7 @@ import com.slate.browser.data.Suggestion
 import com.slate.browser.tabs.Tab
 import com.slate.browser.tabs.TabManager
 import com.slate.browser.tabs.TabPersistence
+import com.slate.browser.util.ChromeScrollPolicy
 import com.slate.browser.util.UrlUtils
 import com.slate.browser.web.BrowserHost
 import com.slate.browser.web.DesktopMode
@@ -117,6 +118,9 @@ class BrowserViewModel @JvmOverloads constructor(
     private var downloads: DownloadCoordinator? = null
     private var saveJob: Job? = null
     private val bookmarkWrites = Mutex()
+    private var chromeSettleJob: Job? = null
+    private val chromeScrollPolicy =
+        ChromeScrollPolicy(app.resources.displayMetrics.density)
 
     /** The database's view, and the taps that have not reached it yet. */
     private var storedBookmarks: Set<String> = emptySet()
@@ -260,7 +264,7 @@ class BrowserViewModel @JvmOverloads constructor(
         tabManager.select(id)
         overlay = Overlay.NONE
         blurOmnibox()
-        chromeVisible = true
+        showChrome()
     }
 
     fun closeTab(id: String) {
@@ -297,7 +301,7 @@ class BrowserViewModel @JvmOverloads constructor(
         tab.isLoading = true
         tab.progress = 0.02f
         blurOmnibox()
-        chromeVisible = true
+        showChrome()
         val webView = tabManager.webViewFor(tab)
         val headers = WebViewConfigurator.requestHeaders(settings.value)
         if (headers.isEmpty()) webView.loadUrl(url) else webView.loadUrl(url, headers)
@@ -338,7 +342,7 @@ class BrowserViewModel @JvmOverloads constructor(
         val webView = activeTab?.webView ?: return false
         if (!webView.canGoBack()) return false
         webView.goBack()
-        chromeVisible = true
+        showChrome()
         return true
     }
 
@@ -382,7 +386,7 @@ class BrowserViewModel @JvmOverloads constructor(
     fun focusOmnibox(text: String? = null) {
         omniboxText = text ?: activeTab?.url.orEmpty()
         isOmniboxFocused = true
-        chromeVisible = true
+        showChrome()
         updateSuggestions(omniboxText)
     }
 
@@ -421,13 +425,38 @@ class BrowserViewModel @JvmOverloads constructor(
 
     // ---- Chrome, immersive mode, fullscreen media --------------------------
 
+    /**
+     * Moving the toolbar resizes the page, so it is never done while the page is moving.
+     *
+     * The policy decides what the toolbar should do; this applies that decision only once
+     * scrolling has actually stopped. One resize at rest is invisible. The same resize during a
+     * fling re-lays out and re-rasters the page under a moving compositor, which is precisely
+     * what tears — and doing it repeatedly, as an unfiltered per-frame rule does, tears
+     * continuously.
+     */
     fun onPageScrolled(delta: Int, scrollY: Int) {
         if (!settings.value.hideBarsOnScroll || isOmniboxFocused || isImmersive) return
-        when {
-            scrollY <= SCROLL_TOP_SLOP -> chromeVisible = true
-            delta > SCROLL_HIDE_THRESHOLD -> chromeVisible = false
-            delta < -SCROLL_SHOW_THRESHOLD -> chromeVisible = true
+        chromeScrollPolicy.onScroll(delta, scrollY)
+
+        if (chromeScrollPolicy.desired == chromeVisible) {
+            chromeSettleJob?.cancel()
+            chromeSettleJob = null
+            return
         }
+        // Restarted by every scroll event, so it only fires in the quiet after the last one.
+        chromeSettleJob?.cancel()
+        chromeSettleJob = viewModelScope.launch {
+            delay(CHROME_SETTLE_MS)
+            chromeVisible = chromeScrollPolicy.desired
+        }
+    }
+
+    /** Brings the chrome back for a reason other than scrolling, and forgets any pending move. */
+    private fun showChrome() {
+        chromeSettleJob?.cancel()
+        chromeSettleJob = null
+        chromeScrollPolicy.reset(visible = true)
+        chromeVisible = true
     }
 
     fun enterImmersive() {
@@ -442,7 +471,7 @@ class BrowserViewModel @JvmOverloads constructor(
             return
         }
         isImmersive = false
-        chromeVisible = true
+        showChrome()
     }
 
     fun toggleImmersive() {
@@ -499,7 +528,7 @@ class BrowserViewModel @JvmOverloads constructor(
         isMediaFullscreen = false
         isImmersive = false
         lockLandscapeForMedia = false
-        chromeVisible = true
+        showChrome()
         activeTab?.webView?.let { webView ->
             mediaAgent.exitFullscreen(webView)
             webView.settings.mediaPlaybackRequiresUserGesture = !settings.value.allowAutoplay
@@ -560,7 +589,7 @@ class BrowserViewModel @JvmOverloads constructor(
 
     fun openFind() {
         find = FindState(active = true)
-        chromeVisible = true
+        showChrome()
     }
 
     fun closeFind() {
@@ -716,7 +745,7 @@ class BrowserViewModel @JvmOverloads constructor(
                 SettingToggle.AUTO_IMMERSIVE -> settingsStore.setAutoImmersive(value)
                 SettingToggle.HIDE_ON_SCROLL -> {
                     settingsStore.setHideBarsOnScroll(value)
-                    if (!value) chromeVisible = true
+                    if (!value) showChrome()
                 }
                 SettingToggle.CLEAR_ON_EXIT -> settingsStore.setClearOnExit(value)
             }
@@ -1005,9 +1034,8 @@ class BrowserViewModel @JvmOverloads constructor(
     }
 
     private companion object {
-        const val SCROLL_HIDE_THRESHOLD = 12
-        const val SCROLL_SHOW_THRESHOLD = 8
-        const val SCROLL_TOP_SLOP = 24
+        /** Long enough that a fling's trailing frames do not count as "stopped". */
+        const val CHROME_SETTLE_MS = 160L
         const val THUMBNAIL_WIDTH = 360
     }
 }

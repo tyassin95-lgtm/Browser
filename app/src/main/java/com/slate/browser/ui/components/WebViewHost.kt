@@ -5,6 +5,8 @@ import android.webkit.WebView
 import android.widget.FrameLayout
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.viewinterop.AndroidView
 
 /**
@@ -14,7 +16,8 @@ import androidx.compose.ui.viewinterop.AndroidView
  * recreates a WebView and never triggers a reload — the view is simply re-parented.
  */
 @Composable
-fun WebViewHost(webView: WebView?, modifier: Modifier = Modifier) {
+fun WebViewHost(webView: WebView?, backgroundColor: Color, modifier: Modifier = Modifier) {
+    val argb = backgroundColor.toArgb()
     AndroidView(
         modifier = modifier,
         factory = { context ->
@@ -26,6 +29,12 @@ fun WebViewHost(webView: WebView?, modifier: Modifier = Modifier) {
             }
         },
         update = { container ->
+            // Both the host and the page are painted opaque. A transparent WebView has to be
+            // blended with whatever is behind it on every frame instead of being handed to the
+            // compositor as a finished layer, and any gap the blend does not cover shows the
+            // previous frame through — most visibly at the moment the view is resized.
+            container.setBackgroundColor(argb)
+            webView?.setBackgroundColor(argb)
             val current = container.getChildAt(0)
             if (current === webView) return@AndroidView
             if (current != null) container.removeAllViews()
