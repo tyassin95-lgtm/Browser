@@ -2,7 +2,15 @@
   "name": "slate-media-agent-tests",
   "private": true,
   "version": "1.0.0",
-  "description": "DOM-level tests for the in-page media agent, run outside Gradle so the Android build needs no Node toolchain.",
-  "scripts": { "test": "node test-media-agent.js" },
-  "devDependencies": { "jsdom": "^25.0.0" }
+  "description": "Test suites for the injected scripts, run outside Gradle so the Android build needs no Node toolchain.",
+  "scripts": {
+    "test": "node test-media-agent.js",
+    "test:e2e": "node test-media-e2e.js",
+    "test:popups": "node test-popup-guard.mjs",
+    "filters": "node build-filters.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^25.0.0",
+    "playwright": "^1.63.0"
+  }
 }

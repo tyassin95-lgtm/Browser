@@ -96,13 +96,16 @@ fun MediaFullscreenOverlay(
     onSeek: (Long) -> Unit,
     onJumpToLive: () -> Unit,
     onVolume: (Float) -> Unit,
+    // No defaults on the callbacks below: a caller that forgets one must fail to compile.
+    // They were optional once, and an omitted argument silently swallowed every double-tap
+    // seek and every scrub update while the overlay still animated as though it had worked.
+    scrubPreview: ScrubPreview?,
+    scrubbingMovesVideo: Boolean,
+    onScrubStart: () -> Unit,
+    onScrubTo: (Long) -> Unit,
+    onScrubEnd: () -> Unit,
+    onNudge: (Long) -> Unit,
     modifier: Modifier = Modifier,
-    scrubPreview: ScrubPreview? = null,
-    scrubbingMovesVideo: Boolean = false,
-    onScrubStart: () -> Unit = {},
-    onScrubTo: (Long) -> Unit = {},
-    onScrubEnd: () -> Unit = {},
-    onNudge: (Long) -> Unit = {},
 ) {
     val owned = mode == MediaOverlayMode.BROWSER
     var controlsVisible by remember { mutableStateOf(true) }

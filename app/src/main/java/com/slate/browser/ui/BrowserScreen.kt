@@ -317,6 +317,12 @@ fun BrowserScreen(
                 onSeek = viewModel::seekMedia,
                 onJumpToLive = viewModel::jumpToLiveEdge,
                 onVolume = viewModel::setMediaVolume,
+                scrubPreview = viewModel.scrubPreview,
+                scrubbingMovesVideo = viewModel.scrubPreviewMode == ScrubPreviewMode.IN_PLACE,
+                onScrubStart = viewModel::beginScrub,
+                onScrubTo = viewModel::scrubTo,
+                onScrubEnd = viewModel::endScrub,
+                onNudge = viewModel::nudgeMedia,
             )
         }
 
@@ -340,6 +346,12 @@ fun BrowserScreen(
                 onSeek = viewModel::seekMedia,
                 onJumpToLive = viewModel::jumpToLiveEdge,
                 onVolume = viewModel::setMediaVolume,
+                scrubPreview = null,
+                scrubbingMovesVideo = false,
+                onScrubStart = {},
+                onScrubTo = {},
+                onScrubEnd = {},
+                onNudge = viewModel::nudgeMedia,
             )
         }
 
@@ -462,6 +474,8 @@ private fun OmniboxSheet(
             .pointerInput(Unit) { detectTapGestures { onDismiss() } }
             .pointerInput(Unit) { detectVerticalDragGestures { _, _ -> onDismiss() } },
     ) {
+        // No suggestions means no sheet at all, rather than an empty panel above the toolbar.
+        if (suggestions.isEmpty()) return@Box
         Surface(
             modifier = Modifier
                 .align(if (landscape) Alignment.TopCenter else Alignment.BottomCenter)

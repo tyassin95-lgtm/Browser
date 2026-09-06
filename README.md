@@ -33,20 +33,46 @@ a caller has to remember: `createTab` never changes what is on screen, and `sele
 thing that does. "Open in new tab" therefore means what it says, and a window a page opens for
 itself lands behind the page you are reading rather than in front of it.
 
-**Ad and pop-up blocking.** Requests to advertising and tracking domains are refused before
-they leave the device, which is the difference between saving the data, the battery and the
-tracking and merely tidying the page. Matching is by registrable domain against a curated
-rule set, so a lookup walks a handful of labels of the host — no scanning, no regular
-expressions — on the network threads where every subresource passes. Cosmetic rules are a
-second pass for the gap a blocked request leaves, anchored only to markup that ad tooling
-produces. Windows and navigations go through a single policy, in layers, because each catches a
-different abuse. WebView reports whether a navigation carried a gesture but not *which* gesture,
-so one tap can be replayed into a dozen `window.open` calls that all claim to be user
-initiated — which is how tapping play becomes five advertising tabs. Identity is reconstructed
-from the touch stream instead: a real touch starts an activation and the first thing to ask for
-it consumes it, so one tap opens at most one window and launches at most one app. A window the
-page opened without one is refused, and the browser finds out where it was headed and offers it
-by name so a payment or sign-in window stays one tap away.
+**Ad and pop-up blocking.** The rules are the published community lists — EasyList,
+EasyPrivacy and AdGuard's mobile list, about 115,000 network rules and 30,000 element-hiding
+rules — carried in the Adblock Plus syntax they are published in and matched by the browser's
+own engine. Keeping the published format is the point: updating the blocking means dropping in
+newer copies of the lists (`node tools/build-filters.mjs --fetch`), not editing a hand-written
+set of domains that falls behind the week it is written.
+
+A hundred thousand rules cannot be scanned per request, so they are indexed the way every
+serious blocker indexes them: each rule contributes one literal token from its pattern, and a
+request only tests the rules filed under the tokens its own address contains. A typical lookup
+compares a handful of rules and allocates nothing but those token substrings, which is what
+makes it safe on the network threads every subresource passes through. `$third-party`,
+`$domain=`, `$script`/`$image`/`$subdocument` and `@@` exceptions all mean what they mean in
+the lists, so a rule scoped to a site applies there and nowhere else. Compiling the lists takes
+about a third of a second and 26MB, done once at launch on a background thread.
+
+Element hiding is the second pass, for the advertising a network rule cannot reach because the
+site serves it from its own origin: the list rules scoped to the site being visited, plus the
+unscoped ones that name advertising unambiguously in the identifier itself. "ad" alone does not
+qualify — it matches *header*, *gradient* and *download*, and a blocker that hides those is
+worse than one that misses an advert.
+
+Requests are only half of it. A transparent layer over a play button, six windows opened from
+one tap, a notification prompt on arrival and fullscreen taken for an advert are all the site's
+own first-party script and never touch the network, so there is an in-page guard for them too,
+installed at document start in every frame. It ties each of those to a real user gesture rather
+than to any particular site: a window is granted for a click and not for the `pointerdown`
+before one, which is exactly the line between "open in a new window" and a pop-under that
+spends your tap before it reaches the player. A full-viewport, contentless, transparent layer
+over the thing you tapped is identified from what it is, disabled, and the tap passed to
+whatever it was covering — so the first tap plays the video.
+
+Windows and navigations then go through a single browser-side policy, in layers, because each
+catches a different abuse. WebView reports whether a navigation carried a gesture but not
+*which* gesture, so one tap can be replayed into a dozen `window.open` calls that all claim to
+be user initiated. Identity is reconstructed from the touch stream instead: a real touch starts
+an activation and the first thing to ask for it consumes it, so one tap opens at most one
+window and launches at most one app. A window the page opened without one is refused, and the
+browser finds out where it was headed and offers it by name so a payment or sign-in window
+stays one tap away.
 
 Leaving the browser always asks first, and an `intent:` URL carrying an ordinary web address is
 kept here rather than dispatched — handing a web address to another app is precisely how a page
@@ -196,8 +222,10 @@ and it only accepts a call while the browser is genuinely waiting for one the us
 ## Tests
 
 ```
-./gradlew testDebugUnitTest    # 163 tests, Android framework via Robolectric
-cd tools && npm install && npm test   # 42 tests, the injected agent against a real DOM
+./gradlew testDebugUnitTest             # 165 tests, Android framework via Robolectric
+cd tools && npm install && npm test     # 42 tests, the injected agent against a real DOM
+cd tools && node test-media-e2e.js      # seeking and previews in real Chromium, on real video
+cd tools && node test-popup-guard.mjs   # the in-page guard against real pop-up techniques
 ```
 
 The Android tests include `BrowserUiTest` and `MediaFullscreenTest`, which compose the actual
@@ -225,6 +253,34 @@ fail. `LayoutInsetsTest` dispatches real window insets into the composition and 
 bounds, so "the page never sits under the toolbar" and "the menu button never sits under a side
 navigation bar" are checked as geometry rather than assumed.
 
+Two suites answer the question a unit test cannot: *did the user's screen change?* The media
+suite drives the shipped agent inside real Chromium, over real HTTP with range requests, against
+a thirty-second clip whose every second is painted a different flat colour — so reading one
+pixel out of the decoded frame says where playback actually is. Double-tap seeking, scrub
+previews and Media Source streams are all checked that way: the preview is confirmed by
+decoding the image the agent produced and reading the second it depicts, not by observing that
+a callback fired. The pop-up suite runs the shipped in-page guard against a page that uses the
+real techniques — a transparent catcher over the play button, six windows from one tap, a
+notification prompt on arrival, an exit trap — and asserts on what the user gets: the play
+button receives the tap, no pop-under opens, and a genuine click-driven window still opens once.
+Each check is run with the guard off first, so a check that would pass either way is caught.
+
+Both found real defects that the unit tests had passed over. The fullscreen overlay's seek and
+scrub callbacks were never passed from the screen to the overlay at all: they carried no-op
+defaults, so every double tap and every drag was silently swallowed while the overlay animated
+as though it had worked, and the tests all called the ViewModel directly and never noticed.
+Those parameters no longer have defaults, so the compiler enforces the connection. The pop-up
+guard's first version intercepted `pointerdown`, which stopped the page's own handlers and
+therefore stopped the video from playing at all — visible immediately in the browser, invisible
+to any assertion about the guard's own state.
+
+The blocking is checked against traffic the reported sites really produce: the third-party
+addresses embedded in the live markup of jav.guru, sxyprn.com, pimpbunny.com and
+xmoviesforyou.com, replayed through the shipped engine and the shipped lists. The assertion is
+on the verdicts rather than on a score — the advertising and tracking hosts those pages embed
+are refused, and the hosts carrying their images and video are not. A blocker judged only on
+how much it blocks would rate well and leave you with a broken site.
+
 One environment limit worth naming: a Material3 text field inside a dialog never reports idle
 under Robolectric, so those few dialogs are covered at the ViewModel level instead of by driving
 their UI.
@@ -234,8 +290,9 @@ their UI.
 ```
 data/    Room entities, DAOs, repository, settings
 web/     WebView configuration, clients, blocking, downloads, desktop mode, gestures, media
-assets/  media_agent.js — the in-page half of fullscreen video, injected into every frame
-tools/   Node test suite for that agent (not part of the Gradle build)
+web/filter/  the Adblock Plus rule parser, network matcher and element-hiding index
+assets/  media_agent.js and popup_guard.js, injected into every frame; filters/ — the lists
+tools/   Node test suites and the filter-list build script (not part of the Gradle build)
 tabs/    Tab model, the live-WebView budget, session persistence
 ui/      Compose surface: browsing screen, chrome, overlays, dialogs, theme
 ```

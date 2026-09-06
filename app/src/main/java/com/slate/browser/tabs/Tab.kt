@@ -83,6 +83,9 @@ class Tab(
     /** Handle for the cosmetic filter script, so it can be lifted when blocking is turned off. */
     internal var cosmeticScript: androidx.webkit.ScriptHandler? = null
 
+    /** Handle for the in-page popup guard, removed with it when blocking is turned off. */
+    internal var guardScript: androidx.webkit.ScriptHandler? = null
+
     /** Deferred load for tabs restored from disk that have never been shown. */
     internal var pendingUrl: String? = null
 

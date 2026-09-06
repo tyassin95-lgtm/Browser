@@ -44,8 +44,9 @@ class SlateWebViewClient(
         request: WebResourceRequest,
     ): WebResourceResponse? {
         if (!blockingEnabled()) return null
-        if (!blocker.shouldBlock(request)) return null
-        blocker.recordBlock()
+        // The page's own address decides what counts as third-party and which `$domain=` rules
+        // apply, and it cannot be read from a network thread, so it is captured as it changes.
+        if (!blocker.shouldBlock(request, documentUrl)) return null
         onRequestBlocked()
         return blocker.blockedResponse(request)
     }
@@ -68,7 +69,6 @@ class SlateWebViewClient(
             is NavigationDecision.Allow -> false
 
             is NavigationDecision.Block -> {
-                blocker.recordBlock()
                 onRequestBlocked()
                 onNavigationBlocked(url, decision.reason)
                 true
@@ -104,7 +104,16 @@ class SlateWebViewClient(
         return true
     }
 
+    /**
+     * The address of the document currently loaded in this tab, published for the network
+     * threads. Third-party scoping and `$domain=` rules are decided against it, and
+     * `WebView.getUrl()` may only be read on the UI thread.
+     */
+    @Volatile
+    private var documentUrl: String? = null
+
     override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+        documentUrl = url
         pageStarted(tab, url)
     }
 
@@ -114,6 +123,7 @@ class SlateWebViewClient(
 
     override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
         // Single-page apps navigate without a page load; keep the omnibox honest.
+        documentUrl = url
         tab.url = url
         tab.canGoBack = view.canGoBack()
         tab.canGoForward = view.canGoForward()

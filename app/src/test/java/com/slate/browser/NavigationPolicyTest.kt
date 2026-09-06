@@ -31,7 +31,10 @@ class NavigationPolicyTest {
     fun setUp() {
         now = 10_000L
         activation = UserActivation { now }
-        policy = NavigationPolicy(ContentBlocker(ApplicationProvider.getApplicationContext()), activation)
+        val blocker = ContentBlocker(ApplicationProvider.getApplicationContext())
+        // The lists load off the main thread; a test that raced them would be testing nothing.
+        check(blocker.awaitReady()) { "filter lists failed to load: ${blocker.loadFailure}" }
+        policy = NavigationPolicy(blocker, activation)
     }
 
     private fun decide(

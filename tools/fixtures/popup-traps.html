@@ -1,0 +1,51 @@
+<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>popup traps</title>
+<style>
+  html,body{margin:0;height:100%;background:#111;color:#eee;font:16px sans-serif}
+  #player{position:relative;height:100%;display:flex;align-items:center;justify-content:center}
+  #play{width:120px;height:120px;border-radius:60px;background:#e33;border:0;color:#fff;font-size:18px}
+  /* The trap: a full-viewport transparent absolutely-positioned catcher over the play button. */
+  #catcher{position:absolute;inset:0;background:rgba(0,0,0,0);z-index:9999}
+</style>
+<div id="player">
+  <button id="play">PLAY</button>
+  <a id="catcher" href="https://ads.example.invalid/landing" target="_blank"></a>
+</div>
+<script>
+  window.__played = 0;
+  document.getElementById('play').addEventListener('click', () => { window.__played++; });
+
+  // Pop-under: one tap, many windows, then pull the opener back to the front.
+  window.__openCalls = 0; window.__openReturned = 0;
+  document.addEventListener('pointerdown', () => {
+    for (let i = 0; i < 6; i++) {
+      window.__openCalls++;
+      const w = window.open('https://ads.example.invalid/pop' + i, '_blank');
+      if (w) window.__openReturned++;
+    }
+    window.blur(); window.focus();
+  }, true);
+
+  // Asked for on arrival, before the user has done anything.
+  window.__notify = 'pending';
+  try { Notification.requestPermission().then(r => { window.__notify = r; }); } catch (e) { window.__notify = 'threw'; }
+
+  // Fullscreen taken without a gesture.
+  window.__fs = 'pending';
+  document.documentElement.requestFullscreen().then(() => { window.__fs = 'granted'; }, () => { window.__fs = 'denied'; });
+
+  // Exit trap.
+  window.onbeforeunload = function () { return 'stay'; };
+  window.__beforeUnloadInstalled = window.onbeforeunload !== null;
+
+  // The legitimate case: a control that opens a window from a click, twice over.
+  window.__legitOpened = 0;
+  const legit = document.createElement('button');
+  legit.id = 'legit';
+  legit.textContent = 'open';
+  legit.style.cssText = 'position:fixed;left:8px;top:8px;z-index:99999';
+  legit.addEventListener('click', () => {
+    for (let i = 0; i < 2; i++) if (window.open('https://ads.example.invalid/legit' + i, '_blank')) window.__legitOpened++;
+  });
+  document.body.appendChild(legit);
+</script>

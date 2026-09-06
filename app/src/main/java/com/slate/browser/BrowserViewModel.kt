@@ -39,6 +39,7 @@ import com.slate.browser.util.UrlUtils
 import com.slate.browser.web.BrowserHost
 import com.slate.browser.web.ContentBlocker
 import com.slate.browser.web.CosmeticFilter
+import com.slate.browser.web.InPageGuard
 import com.slate.browser.web.NavigationPolicy
 import com.slate.browser.web.PopupGuard
 import com.slate.browser.web.UserActivation
@@ -108,7 +109,9 @@ class BrowserViewModel @JvmOverloads constructor(
     private val desktopMode = DesktopMode()
     private val contentBlocker = ContentBlocker(app)
     private val popupGuard = PopupGuard(app)
-    private val cosmeticFilter = CosmeticFilter()
+    private val cosmeticFilter = CosmeticFilter(contentBlocker)
+
+    private val inPageGuard = InPageGuard(app)
     private val userActivation = UserActivation()
     private val navigationPolicy = NavigationPolicy(contentBlocker, userActivation)
 
@@ -258,7 +261,9 @@ class BrowserViewModel @JvmOverloads constructor(
         if (initialUrl != null) {
             openInNewTabAndSwitch(initialUrl)
         } else if (tabManager.count == 0) {
-            newTab(focusOmnibox = true)
+            // Launching is not a request to type. The browser comes up on the page, with the
+            // keyboard down and nothing overlaying it; the omnibox opens when the user taps it.
+            newTab(focusOmnibox = false)
         }
     }
 
@@ -460,10 +465,9 @@ class BrowserViewModel @JvmOverloads constructor(
         suggestionJob?.cancel()
         val trimmed = query.trim()
         if (trimmed.isEmpty()) {
-            // An empty omnibox offers the pages the user returns to most, not a blank sheet.
-            suggestionJob = viewModelScope.launch {
-                suggestions = repository.suggest("", limit = 6)
-            }
+            // Nothing typed, nothing suggested: no list, and no query against history either,
+            // so an empty omnibox costs neither a database read nor a surface to draw.
+            suggestions = emptyList()
             return
         }
         suggestionJob = viewModelScope.launch {
@@ -868,6 +872,7 @@ class BrowserViewModel @JvmOverloads constructor(
             val webView = tab.webView ?: return@forEach
             runCatching { WebViewConfigurator.configure(webView, current, tab.isDesktopMode) }
             runCatching { cosmeticFilter.apply(webView, tab, current.blockAds) }
+            runCatching { inPageGuard.apply(webView, tab, current.blockAds) }
         }
     }
 
@@ -945,6 +950,12 @@ class BrowserViewModel @JvmOverloads constructor(
                 target.media = MediaState.NONE
                 target.blockedCount = 0
                 popupGuard.clear()
+                // Element-hiding rules are chosen by the site being visited, so they follow the
+                // navigation: applied to the document now loading, and installed at document
+                // start for the frames it is about to create.
+                target.webView?.let { view ->
+                    cosmeticFilter.apply(view, target, settings.value.blockAds)
+                }
                 // A new document has scrolled nowhere, so its chrome starts where it should.
                 showChrome(target)
                 if (target.id == tabManager.activeTabId) exitMediaFullscreen()
@@ -1020,6 +1031,7 @@ class BrowserViewModel @JvmOverloads constructor(
         mediaAgent.install(webView)
         desktopMode.apply(webView, tab, tab.isDesktopMode)
         cosmeticFilter.apply(webView, tab, settings.value.blockAds)
+        inPageGuard.apply(webView, tab, settings.value.blockAds)
         webView.addJavascriptInterface(
             mediaAgent.Bridge(
                 onState = { state -> onMediaState(tab, state) },

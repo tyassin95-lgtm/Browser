@@ -135,8 +135,11 @@ class BrowserUiTest {
     @Test
     fun `tapping outside the omnibox dismisses it and gives the toolbar back`() {
         render()
-        // A fresh launch opens with the omnibox ready for typing; the first tap elsewhere must
-        // put it away rather than being swallowed.
+        // A launch is not a request to type, so the omnibox starts closed. Once the user opens
+        // it, the first tap elsewhere must put it away rather than being swallowed.
+        assertFalse("a fresh launch must not focus the omnibox", viewModel.isOmniboxFocused)
+        viewModel.focusOmnibox("")
+        compose.waitForIdle()
         assertTrue(viewModel.isOmniboxFocused)
         compose.onNodeWithContentDescription("1 open tabs").performClick()
         compose.waitForIdle()
@@ -147,8 +150,6 @@ class BrowserUiTest {
     @Test
     fun `the tab counter opens the switcher and a new tab appears there`() {
         render()
-        viewModel.blurOmnibox()
-        compose.waitForIdle()
         compose.onNodeWithContentDescription("1 open tabs").performClick()
         compose.mainClock.advanceTimeBy(600)
         compose.waitForIdle()
@@ -336,7 +337,9 @@ class BrowserUiTest {
     @Test
     fun `back unwinds the layers in the order the user sees them`() {
         render()
-        // A fresh launch has the omnibox open, so that is the first thing back should close.
+        // An open omnibox is the first thing back should close.
+        viewModel.focusOmnibox("")
+        compose.waitForIdle()
         assertEquals(BackAction.BLUR_OMNIBOX, viewModel.pendingBackAction())
         assertTrue(viewModel.handleBack())
 
