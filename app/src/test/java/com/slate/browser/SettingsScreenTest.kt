@@ -54,6 +54,8 @@ class SettingsScreenTest {
         "Hide toolbar while scrolling",
         "Fullscreen in landscape",
         "Reopen tabs on launch",
+        "Block ads and trackers",
+        "Block pop-ups and redirects",
         "Allow autoplay",
         "Turn sideways for video",
         "Save history",

@@ -6,6 +6,7 @@ import android.webkit.WebView
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.slate.browser.util.UrlUtils
@@ -44,6 +45,10 @@ class Tab(
         internal set
     var errorMessage by mutableStateOf<String?>(null)
         internal set
+    /** How many requests this page had refused, reset on every navigation. */
+    var blockedCount by mutableIntStateOf(0)
+        internal set
+
     /** What this tab is playing, reported by the in-page media agent. */
     var media by mutableStateOf(MediaState.NONE)
         internal set
@@ -64,6 +69,9 @@ class Tab(
 
     /** Handle for the desktop-viewport script, so it can be removed when the mode is turned off. */
     internal var desktopScript: androidx.webkit.ScriptHandler? = null
+
+    /** Handle for the cosmetic filter script, so it can be lifted when blocking is turned off. */
+    internal var cosmeticScript: androidx.webkit.ScriptHandler? = null
 
     /** Deferred load for tabs restored from disk that have never been shown. */
     internal var pendingUrl: String? = null

@@ -5,7 +5,7 @@ for, and the smallest amount of chrome needed to get to the next one.
 
 ## Installing
 
-`dist/slate-browser-1.4.apk` is a signed release build. Copy it to the phone and open it;
+`dist/slate-browser-1.5.apk` is a signed release build. Copy it to the phone and open it;
 Android will ask you to allow installs from your file manager the first time. Minimum Android
 8.0 (API 26).
 
@@ -27,6 +27,22 @@ it and `keystore.properties` before publishing anywhere.
 **Browsing.** Tabs with a visual switcher, find in page, downloads, file uploads, pop-ups,
 camera/microphone/location prompts, page dialogs, and certificate warnings that name the host
 and make proceeding an explicit choice.
+
+**Ad and pop-up blocking.** Requests to advertising and tracking domains are refused before
+they leave the device, which is the difference between saving the data, the battery and the
+tracking and merely tidying the page. Matching is by registrable domain against a curated
+rule set, so a lookup walks a handful of labels of the host — no scanning, no regular
+expressions — on the network threads where every subresource passes. Cosmetic rules are a
+second pass for the gap a blocked request leaves, anchored only to markup that ad tooling
+produces. A window the page opens on its own is refused outright rather than parked in the
+background, since a pop-under nobody sees is one nobody can close; the browser finds out where
+it was headed and offers it by name, so a payment or sign-in window is one tap away. Navigations
+to blocked destinations that no one asked for are stopped too, while anything actually tapped is
+left alone.
+
+**Long press.** Links and images get a sheet of what applies to them and nothing else — open in
+a new or background tab, copy, share, save the image. Text, form fields and anything selectable
+are left to the page, so selection handles and the platform text menu behave normally.
 
 **Navigation by swipe.** Drag right to go back, left to go forward, from anywhere on the page.
 The page is offered every touch first and the gesture is only taken over once the drag is
@@ -103,10 +119,16 @@ decoys are skipped, and a canvas the player draws into is promoted alongside the
 so canvas-rendered players show a picture too. A watchdog re-asserts all of it against players
 that rewrite their own layout.
 
-**Media controls.** Play and pause, a scrub bar with position and duration, and volume. A live
-stream is treated as live: no scrub bar where there is nothing to scrub, a DVR bar where the
-stream keeps a rewind buffer, and a badge that turns into one-tap "go live" once you are behind
-the edge. Controls fade out on their own and come back on a tap.
+**Media controls.** Play and pause, a scrub bar with position and duration, and volume. Double
+tap either side to jump ten seconds, accumulating while you keep tapping. Dragging the scrub bar
+shows the frame you are about to land on: a second detached video element is seeked and drawn
+into a small canvas, which works when the source is a plain URL the server lets us read back,
+and falls back to a timestamp when it is a Media Source stream or a cross-origin file that
+taints the canvas — both common, so the failure is reported once rather than retried per frame.
+A live stream is treated as live: no scrub bar where there is nothing to scrub, no double-tap
+seeking either, a DVR bar where the stream keeps a rewind buffer, and a badge that turns into
+one-tap "go live" once you are behind the edge. Controls fade out on their own and come back on
+a tap.
 
 Where the video lives inside an embedded player, each frame on the way down is expanded in turn,
 so the picture ends up filling the display no matter how deeply it was nested. A stream wider
@@ -148,8 +170,8 @@ and it only accepts a call while the browser is genuinely waiting for one the us
 ## Tests
 
 ```
-./gradlew testDebugUnitTest    # 118 tests, Android framework via Robolectric
-cd tools && npm install && npm test   # 31 tests, the injected agent against a real DOM
+./gradlew testDebugUnitTest    # 138 tests, Android framework via Robolectric
+cd tools && npm install && npm test   # 35 tests, the injected agent against a real DOM
 ```
 
 The Android tests include `BrowserUiTest` and `MediaFullscreenTest`, which compose the actual
@@ -185,7 +207,7 @@ their UI.
 
 ```
 data/    Room entities, DAOs, repository, settings
-web/     WebView configuration, clients, downloads, favicons, desktop mode, gestures, media
+web/     WebView configuration, clients, blocking, downloads, desktop mode, gestures, media
 assets/  media_agent.js — the in-page half of fullscreen video, injected into every frame
 tools/   Node test suite for that agent (not part of the Gradle build)
 tabs/    Tab model, the live-WebView budget, session persistence

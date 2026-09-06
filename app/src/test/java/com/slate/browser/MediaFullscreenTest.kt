@@ -387,6 +387,101 @@ class MediaFullscreenTest {
             tab.webView!!.settings.mediaPlaybackRequiresUserGesture)
     }
 
+    // ---- Seeking gestures ----------------------------------------------------
+
+    @Test
+    fun `relative seeking is clamped to the recording`() {
+        render()
+        playing(
+            MediaState(
+                hasVideo = true, isPlaying = true, width = 1920, height = 1080,
+                positionMs = 5_000, durationMs = 60_000,
+            )
+        )
+        viewModel.enterMediaFullscreen()
+        compose.waitForIdle()
+
+        // Ten seconds back from five seconds in is the start, not a negative position.
+        viewModel.nudgeMedia(-10_000)
+        compose.waitForIdle()
+        assertTrue("a clamped seek must not throw or run negative", viewModel.isMediaFullscreen)
+    }
+
+    @Test
+    fun `a live stream with no rewind buffer refuses relative seeking`() {
+        render()
+        playing(widescreenLive)
+        viewModel.enterMediaFullscreen()
+        compose.waitForIdle()
+
+        // Nothing to seek through, so the gesture must be inert rather than pretending.
+        assertFalse(widescreenLive.isSeekable)
+        assertFalse(widescreenLive.hasLiveWindow)
+        viewModel.nudgeMedia(-10_000)
+        compose.waitForIdle()
+        assertTrue(viewModel.isMediaFullscreen)
+    }
+
+    @Test
+    fun `a live stream with a rewind buffer allows relative seeking inside it`() {
+        render()
+        val dvr = MediaState(
+            hasVideo = true, isPlaying = true, isLive = true, width = 1920, height = 1080,
+            positionMs = 300_000, seekableStartMs = 60_000, seekableEndMs = 360_000,
+        )
+        playing(dvr)
+        viewModel.enterMediaFullscreen()
+        compose.waitForIdle()
+
+        assertTrue(dvr.hasLiveWindow)
+        viewModel.nudgeMedia(-10_000)
+        compose.waitForIdle()
+        assertTrue(viewModel.isMediaFullscreen)
+    }
+
+    // ---- Scrub preview -------------------------------------------------------
+
+    @Test
+    fun `a page that cannot produce preview frames is not asked again`() {
+        render()
+        playing(
+            MediaState(
+                hasVideo = true, isPlaying = true, width = 1920, height = 1080,
+                positionMs = 1_000, durationMs = 60_000,
+            )
+        )
+        viewModel.enterMediaFullscreen()
+        compose.waitForIdle()
+        assertTrue(viewModel.scrubPreviewAvailable)
+
+        // Cross-origin video taints the canvas, which is the common case; the page says so once.
+        viewModel.onScrubPreview(null)
+        compose.waitForIdle()
+        assertFalse(viewModel.scrubPreviewAvailable)
+        assertEquals(null, viewModel.scrubPreview)
+
+        // Scrubbing still works, it just shows the timestamp instead of a frame.
+        viewModel.beginScrub()
+        viewModel.scrubTo(30_000)
+        viewModel.endScrub()
+        compose.waitForIdle()
+        assertTrue(viewModel.isMediaFullscreen)
+    }
+
+    @Test
+    fun `preview availability is reconsidered for the next video`() {
+        render()
+        playing(MediaState(hasVideo = true, isPlaying = true, width = 1920, height = 1080, durationMs = 60_000))
+        viewModel.enterMediaFullscreen()
+        viewModel.onScrubPreview(null)
+        compose.waitForIdle()
+        assertFalse(viewModel.scrubPreviewAvailable)
+
+        viewModel.exitMediaFullscreen()
+        compose.waitForIdle()
+        assertTrue("a different video may well be able to", viewModel.scrubPreviewAvailable)
+    }
+
     private object SilentHost : BrowserHost {
         override fun onEnterElementFullscreen(view: View, callback: WebChromeClient.CustomViewCallback) = Unit
         override fun onExitElementFullscreen() = Unit

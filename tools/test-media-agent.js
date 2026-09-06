@@ -529,6 +529,70 @@ test('a portrait stream is reported as portrait so the phone is not rotated', as
   assert.strictEqual(last.h, 1280);
 });
 
+// ------------------------------------------------------- scrub previews
+
+test('a stream assembled by Media Source reports that it cannot be previewed', async () => {
+  // A blob: source belongs to one element and cannot be handed to a second one, so there is
+  // nothing to seek and draw. Saying so once is what lets the browser fall back cleanly.
+  const { win, doc, previews } = createPage('<video id="v"></video>');
+  const v = describeVideo(doc.getElementById('v'), { width: 640, height: 360, paused: false });
+  Object.defineProperty(v, 'currentSrc', { value: 'blob:https://example.test/abc', configurable: true });
+
+  win.__slateMedia.command('enter', 'contain');
+  await delay(ENTER_SETTLE_MS);
+  win.__slateMedia.command('previewOpen');
+  await delay(120);
+
+  assert.strictEqual(previews.length, 1);
+  assert.strictEqual(previews[0].data, '', 'an empty payload means "cannot preview"');
+});
+
+test('a video with no source at all reports the same', async () => {
+  const { win, doc, previews } = createPage('<video id="v"></video>');
+  const v = describeVideo(doc.getElementById('v'), { width: 640, height: 360, paused: false });
+  Object.defineProperty(v, 'currentSrc', { value: '', configurable: true });
+
+  win.__slateMedia.command('enter', 'contain');
+  await delay(ENTER_SETTLE_MS);
+  win.__slateMedia.command('previewOpen');
+  await delay(120);
+
+  assert.strictEqual(previews[previews.length - 1].data, '');
+});
+
+test('scrubbing a source that cannot be previewed never breaks playback', async () => {
+  const { win, doc } = createPage('<video id="v"></video>');
+  const v = describeVideo(doc.getElementById('v'), { width: 640, height: 360, paused: false });
+  Object.defineProperty(v, 'currentSrc', { value: 'blob:https://example.test/abc', configurable: true });
+
+  win.__slateMedia.command('enter', 'contain');
+  await delay(ENTER_SETTLE_MS);
+  win.__slateMedia.command('previewOpen');
+  win.__slateMedia.command('previewAt', '12.5');
+  win.__slateMedia.command('previewAt', '30');
+  win.__slateMedia.command('previewClose');
+  await delay(120);
+
+  assert.strictEqual(v.paused, false, 'the video that is playing must be untouched');
+  assert.strictEqual(styleOf(doc.getElementById('v'), 'position'), 'fixed');
+});
+
+test('leaving fullscreen tears the preview down', async () => {
+  const { win, doc } = createPage('<video id="v"></video>');
+  const v = describeVideo(doc.getElementById('v'), { width: 640, height: 360, paused: false });
+  Object.defineProperty(v, 'currentSrc', { value: 'https://cdn.example.test/clip.mp4', configurable: true });
+
+  win.__slateMedia.command('enter', 'contain');
+  await delay(ENTER_SETTLE_MS);
+  win.__slateMedia.command('previewOpen');
+  await delay(60);
+  win.__slateMedia.command('exit');
+  await delay(60);
+
+  assert.strictEqual(win.__slateMedia.isActive(), false);
+  assert.strictEqual(doc.getElementById('v').hasAttribute('style'), false);
+});
+
 // ------------------------------------------------------------------- runner
 
 (async () => {

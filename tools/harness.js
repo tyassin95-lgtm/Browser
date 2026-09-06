@@ -30,15 +30,23 @@ function createPage(html, options = {}) {
              x: 0, y: 0, toJSON() { return this; } };
   };
 
+  // jsdom implements no media pipeline, so these would otherwise fill the output with
+  // "not implemented" notices from calls that are perfectly ordinary on a device.
+  win.HTMLMediaElement.prototype.load = function () {};
+  win.HTMLMediaElement.prototype.play = function () { return Promise.resolve(); };
+  win.HTMLMediaElement.prototype.pause = function () {};
+
   const reports = [];
   const entered = [];
+  const previews = [];
   win.SlateMedia = {
     report: (json) => reports.push(JSON.parse(json)),
     entered: (ok) => entered.push(ok),
+    preview: (data, t) => previews.push({ data, t }),
   };
 
   win.eval(AGENT);
-  return { dom, win, doc: win.document, reports, entered };
+  return { dom, win, doc: win.document, reports, entered, previews };
 }
 
 /** Gives a <video> the geometry and playback state jsdom will not produce on its own. */

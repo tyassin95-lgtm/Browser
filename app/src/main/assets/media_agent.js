@@ -427,6 +427,7 @@
     activeCanvas = null;
     if (styleTag) { try { styleTag.remove(); } catch (e) { /* ignore */ } styleTag = null; }
     restoreViewport();
+    previewClose();
     active = false;
     activeVideo = null;
     routeChild = null;
@@ -468,6 +469,9 @@
         }
       }
       else if (type === 'fill') { fillMode = arg; activeVideo = v; applyFill(); }
+      else if (type === 'previewOpen') { activeVideo = activeVideo || v; previewOpen(); return; }
+      else if (type === 'previewAt') { previewAt(arg); return; }
+      else if (type === 'previewClose') { previewClose(); return; }
     } catch (e) { /* ignore */ }
     scheduleReport();
   }
@@ -544,6 +548,109 @@
    */
   var progressTimer = null;
 
+  /*
+   * Scrub previews.
+   *
+   * A second, detached video element is pointed at the same source and seeked to wherever the
+   * finger is, then drawn into a small canvas. That only works when the source is a plain URL
+   * the element can be given again and the server allows the pixels to be read back: a stream
+   * assembled by Media Source has a blob: source no second element can open, and a cross-origin
+   * file without CORS taints the canvas and makes toDataURL throw. Both are common, so the
+   * failure is reported once and the browser falls back rather than retrying per frame.
+   */
+  var preview = null;
+
+  function previewReport(dataUrl, time) {
+    var message = { ns: NS, type: 'preview', data: dataUrl, t: time };
+    if (TOP) publishPreview(message); else post(parent, message);
+  }
+
+  function publishPreview(message) {
+    try {
+      if (window.SlateMedia && window.SlateMedia.preview) {
+        window.SlateMedia.preview(message.data || '', message.t || 0);
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  function previewOpen() {
+    previewClose();
+    var v = activeVideo;
+    if (!v) { previewReport('', 0); return; }
+    var src = v.currentSrc || v.src || '';
+    // Nothing a second element could ever load.
+    if (!src || src.lastIndexOf('blob:', 0) === 0 || src.lastIndexOf('data:', 0) === 0) {
+      previewReport('', 0);
+      return;
+    }
+    try {
+      var el = document.createElement('video');
+      el.muted = true;
+      el.preload = 'auto';
+      el.setAttribute('playsinline', '');
+      el.crossOrigin = 'anonymous';
+      var canvas = document.createElement('canvas');
+      canvas.width = 192;
+      canvas.height = 108;
+      preview = { el: el, canvas: canvas, pending: null, busy: false, dead: false };
+      el.addEventListener('seeked', previewDraw);
+      el.addEventListener('error', previewFail);
+      el.src = src;
+    } catch (e) { previewFail(); }
+  }
+
+  function previewFail() {
+    if (preview) preview.dead = true;
+    previewReport('', 0);
+  }
+
+  function previewAt(seconds) {
+    var t = parseFloat(seconds);
+    if (!preview || preview.dead || !isFinite(t)) return;
+    preview.pending = t;
+    if (!preview.busy) previewPump();
+  }
+
+  function previewPump() {
+    if (!preview || preview.dead || preview.pending === null) return;
+    var t = preview.pending;
+    preview.pending = null;
+    preview.busy = true;
+    try { preview.el.currentTime = t; } catch (e) { previewFail(); }
+  }
+
+  function previewDraw() {
+    if (!preview || preview.dead) return;
+    try {
+      var el = preview.el;
+      var canvas = preview.canvas;
+      var ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      // Letterboxed, never stretched: a squashed preview misreads the frame.
+      var vw = el.videoWidth || 16, vh = el.videoHeight || 9;
+      var scale = Math.min(canvas.width / vw, canvas.height / vh);
+      var w = vw * scale, h = vh * scale;
+      ctx.drawImage(el, (canvas.width - w) / 2, (canvas.height - h) / 2, w, h);
+      previewReport(canvas.toDataURL('image/jpeg', 0.55), el.currentTime);
+    } catch (e) {
+      // A tainted canvas throws here, which is the common cross-origin case.
+      previewFail();
+      return;
+    }
+    preview.busy = false;
+    if (preview.pending !== null) previewPump();
+  }
+
+  function previewClose() {
+    if (!preview) return;
+    try {
+      preview.el.removeAttribute('src');
+      preview.el.load();
+    } catch (e) { /* ignore */ }
+    preview = null;
+  }
+
   function reportProgress() {
     if (progressTimer) return;
     progressTimer = setTimeout(function () {
@@ -594,6 +701,10 @@
       if (d.score > 0 && (!state.best || d.score > state.best.score)) {
         state.best = { score: d.score, info: d.info, child: fromChild };
       }
+      return;
+    }
+    if (d.type === 'preview') {
+      if (TOP) publishPreview(d); else post(parent, d);
       return;
     }
     if (d.type === 'progress') {

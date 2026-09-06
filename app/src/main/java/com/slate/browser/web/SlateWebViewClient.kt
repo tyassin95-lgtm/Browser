@@ -7,8 +7,8 @@ import android.net.Uri
 import android.net.http.SslError
 import android.webkit.SslErrorHandler
 import android.webkit.WebResourceError
-import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
+import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.slate.browser.tabs.Tab
@@ -27,11 +27,44 @@ class SlateWebViewClient(
     private val pageStarted: (Tab, String) -> Unit,
     private val pageFinished: (Tab, String, String) -> Unit,
     private val onSslPrompt: (String, () -> Unit, () -> Unit) -> Unit,
+    private val blocker: ContentBlocker,
+    private val blockingEnabled: () -> Boolean,
+    private val onRequestBlocked: () -> Unit,
 ) : WebViewClient() {
+
+    /**
+     * Runs on WebView's network threads, once per subresource. Everything it touches is built
+     * to be cheap enough for that; see [ContentBlocker].
+     */
+    override fun shouldInterceptRequest(
+        view: WebView,
+        request: WebResourceRequest,
+    ): WebResourceResponse? {
+        if (!blockingEnabled()) return null
+        if (!blocker.shouldBlock(request)) return null
+        blocker.recordBlock()
+        onRequestBlocked()
+        return blocker.blockedResponse(request)
+    }
 
     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
         val url = request.url.toString()
+
+        // A navigation the user did not ask for, heading somewhere that exists to serve
+        // advertising, is the redirect hijack. A navigation they *did* ask for is left alone
+        // even if it goes to the same place, because that was their decision to make.
+        if (blockingEnabled() && !request.hasGesture() && blocker.isBlockedDestination(url)) {
+            blocker.recordBlock()
+            onRequestBlocked()
+            return true
+        }
+
         if (UrlUtils.isHttpLike(url)) return false
+
+        // App-store and deep-link jumps out of the browser are only ever legitimate when the
+        // user actually touched something.
+        if (!request.hasGesture() && !request.isForMainFrame) return true
+
         return handleExternal(url)
     }
 

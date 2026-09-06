@@ -1,8 +1,10 @@
 package com.slate.browser.web
 
 import android.content.Context
+import android.graphics.BitmapFactory
 import android.os.Handler
 import android.os.Looper
+import android.util.Base64
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import androidx.webkit.WebViewCompat
@@ -55,6 +57,9 @@ data class MediaState(
     }
 }
 
+/** A frame from the position a finger is hovering over while scrubbing. */
+data class ScrubPreview(val frame: android.graphics.Bitmap, val positionMs: Long)
+
 /** How the video is fitted to the screen when it does not match the display's shape. */
 enum class MediaFit(val cssValue: String) {
     /** The whole frame, letterboxed. Never crops, never stretches. */
@@ -79,6 +84,9 @@ class MediaAgent(context: Context) {
 
     private val appContext = context.applicationContext
     private val main = Handler(Looper.getMainLooper())
+
+    /** One thread: preview frames supersede each other, so they never need to run in parallel. */
+    private val decoder = java.util.concurrent.Executors.newSingleThreadExecutor()
 
     private val script: String by lazy {
         runCatching {
@@ -127,6 +135,13 @@ class MediaAgent(context: Context) {
     fun setVolume(webView: WebView, volume: Float) =
         command(webView, "volume", volume.coerceIn(0f, 1f).toString())
 
+    fun openScrubPreview(webView: WebView) = command(webView, "previewOpen")
+
+    fun previewAt(webView: WebView, positionMs: Long) =
+        command(webView, "previewAt", (positionMs / 1000.0).toString())
+
+    fun closeScrubPreview(webView: WebView) = command(webView, "previewClose")
+
     private fun command(webView: WebView, name: String, arg: String? = null) {
         val argument = if (arg == null) "null" else "'${arg.replace("'", "")}'"
         webView.evaluateJavascript(
@@ -143,6 +158,7 @@ class MediaAgent(context: Context) {
         private val onState: (MediaState) -> Unit,
         private val onEnterResult: (Boolean) -> Unit,
         private val onNavigationHint: (Boolean) -> Unit = {},
+        private val onPreview: (ScrubPreview?) -> Unit = {},
     ) {
         /**
          * The page's verdict on whether the finger that just went down belongs to it. Arrives on
@@ -177,6 +193,29 @@ class MediaAgent(context: Context) {
         @JavascriptInterface
         fun entered(success: Boolean) {
             main.post { onEnterResult(success) }
+        }
+
+        /**
+         * A scrub preview frame, or an empty payload meaning the page cannot produce one.
+         * Decoding happens off the main thread: this arrives several times a second while a
+         * finger is moving, which is exactly when the main thread must not be doing work.
+         */
+        @JavascriptInterface
+        fun preview(dataUrl: String, timeSeconds: Double) {
+            if (dataUrl.isBlank()) {
+                main.post { onPreview(null) }
+                return
+            }
+            decoder.execute {
+                val bitmap = runCatching {
+                    val payload = dataUrl.substringAfter("base64,", "")
+                    if (payload.isEmpty()) return@runCatching null
+                    val bytes = Base64.decode(payload, Base64.DEFAULT)
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                }.getOrNull()
+                val position = (timeSeconds * 1000).toLong().coerceAtLeast(0)
+                main.post { onPreview(bitmap?.let { ScrubPreview(it, position) }) }
+            }
         }
     }
 

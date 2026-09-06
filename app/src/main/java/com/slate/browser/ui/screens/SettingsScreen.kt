@@ -90,6 +90,18 @@ fun SettingsScreen(
                 settings.restoreTabs,
             ) { onToggle(SettingToggle.RESTORE_TABS, it) }
 
+            SectionLabel("Protection")
+            ToggleRow(
+                "Block ads and trackers",
+                "Refuses advertising and tracking requests before they leave the device.",
+                settings.blockAds,
+            ) { onToggle(SettingToggle.BLOCK_ADS, it) }
+            ToggleRow(
+                "Block pop-ups and redirects",
+                "Stops windows and redirects a page opens on its own. Anything you tap still opens.",
+                settings.blockPopups,
+            ) { onToggle(SettingToggle.BLOCK_POPUPS, it) }
+
             SectionLabel("Media")
             ToggleRow(
                 "Allow autoplay",
@@ -198,6 +210,7 @@ fun SettingsScreen(
 
 enum class SettingToggle {
     JAVASCRIPT, DESKTOP_DEFAULT, BLOCK_3P_COOKIES, DNT, AUTOPLAY, ROTATE_FOR_VIDEO,
+    BLOCK_ADS, BLOCK_POPUPS,
     RESTORE_TABS, SAVE_HISTORY, AUTO_IMMERSIVE, HIDE_ON_SCROLL, CLEAR_ON_EXIT,
 }
 

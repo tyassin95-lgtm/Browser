@@ -70,6 +70,7 @@ data class MenuActions(
     val onHistory: () -> Unit,
     val onSettings: () -> Unit,
     val onOpenExternally: () -> Unit,
+    val blockedOnThisPage: Int,
 )
 
 @androidx.compose.material3.ExperimentalMaterial3Api
@@ -147,6 +148,21 @@ fun MenuSheet(
                 onDismiss(); actions.onOpenExternally()
             }
             MenuRow(Icons.Rounded.Settings, "Settings") { onDismiss(); actions.onSettings() }
+
+            if (actions.blockedOnThisPage > 0) {
+                // Stated once, quietly, where someone looking for it will find it — not as a
+                // permanent badge in the toolbar.
+                Text(
+                    text = if (actions.blockedOnThisPage == 1) {
+                        "1 request blocked on this page"
+                    } else {
+                        "${actions.blockedOnThisPage} requests blocked on this page"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 10.dp),
+                )
+            }
             Spacer(Modifier.height(12.dp))
         }
     }

@@ -69,6 +69,8 @@ import com.slate.browser.web.NavigationDirection
 import com.slate.browser.ui.components.FindBar
 import com.slate.browser.ui.components.FullscreenHost
 import com.slate.browser.ui.components.LandscapeBar
+import com.slate.browser.ui.components.LinkContextActions
+import com.slate.browser.ui.components.LinkContextSheet
 import com.slate.browser.ui.components.LoadingLine
 import com.slate.browser.ui.components.MediaFullscreenOverlay
 import com.slate.browser.ui.components.MediaOverlayMode
@@ -349,6 +351,29 @@ fun BrowserScreen(
                 .align(Alignment.BottomCenter)
                 .windowInsetsPadding(systemChromeInsets().only(WindowInsetsSides.Horizontal))
                 .padding(bottom = bottomOccupied + 12.dp, start = 12.dp, end = 12.dp),
+        )
+    }
+
+    // ---- Long-press actions --------------------------------------------------
+    viewModel.linkContext?.let { context ->
+        val contextSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        LinkContextSheet(
+            context = context,
+            sheetState = contextSheetState,
+            onDismiss = viewModel::dismissLinkContext,
+            actions = LinkContextActions(
+                onOpen = { context.linkUrl?.let(viewModel::load) },
+                onOpenNewTab = { context.linkUrl?.let(viewModel::openInNewTab) },
+                onOpenBackgroundTab = { context.linkUrl?.let(viewModel::openInBackgroundTab) },
+                onCopyLink = { context.linkUrl?.let { viewModel.copyToClipboard(it, "Link") } },
+                onShareLink = { context.linkUrl?.let { onShare(it, it) } },
+                onOpenImage = { context.imageUrl?.let(viewModel::openInNewTab) },
+                onSaveImage = { context.imageUrl?.let(viewModel::saveImage) },
+                onCopyImageAddress = {
+                    context.imageUrl?.let { viewModel.copyToClipboard(it, "Image address") }
+                },
+                onShareImage = { context.imageUrl?.let { onShare(it, it) } },
+            ),
         )
     }
 

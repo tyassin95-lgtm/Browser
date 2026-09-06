@@ -44,6 +44,7 @@ fun MenuSheetLayer(
             onHistory = { viewModel.showOverlay(Overlay.HISTORY) },
             onSettings = { viewModel.showOverlay(Overlay.SETTINGS) },
             onOpenExternally = onOpenExternally,
+            blockedOnThisPage = tab?.blockedCount ?: 0,
         ),
         sheetState = sheetState,
         onDismiss = onDismiss,

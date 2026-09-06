@@ -2,6 +2,9 @@ package com.slate.browser
 
 import android.annotation.SuppressLint
 import android.app.Application
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.os.Build
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -34,12 +37,18 @@ import com.slate.browser.tabs.TabPersistence
 import com.slate.browser.util.ChromeScrollPolicy
 import com.slate.browser.util.UrlUtils
 import com.slate.browser.web.BrowserHost
+import com.slate.browser.web.ContentBlocker
+import com.slate.browser.web.CosmeticFilter
+import com.slate.browser.web.PopupGuard
 import com.slate.browser.web.DesktopMode
 import com.slate.browser.web.DownloadCoordinator
 import com.slate.browser.web.FaviconStore
 import com.slate.browser.web.MediaAgent
 import com.slate.browser.web.MediaFit
+import com.slate.browser.web.LinkContext
+import com.slate.browser.web.LinkContextResolver
 import com.slate.browser.web.MediaState
+import com.slate.browser.web.ScrubPreview
 import com.slate.browser.web.NavigationDirection
 import com.slate.browser.web.NavigationGestureListener
 import com.slate.browser.web.SlateWebView
@@ -94,6 +103,9 @@ class BrowserViewModel @JvmOverloads constructor(
     val faviconStore = FaviconStore(app, viewModelScope)
     private val mediaAgent = MediaAgent(app)
     private val desktopMode = DesktopMode()
+    private val contentBlocker = ContentBlocker(app)
+    private val popupGuard = PopupGuard(app)
+    private val cosmeticFilter = CosmeticFilter()
 
     /** How far a swipe must travel to commit, in pixels, resolved once from the display. */
     private val gestureCommitDistancePx =
@@ -155,6 +167,18 @@ class BrowserViewModel @JvmOverloads constructor(
         private set
     var mediaFit by mutableStateOf(MediaFit.CONTAIN)
         private set
+
+    /** The frame under the finger while scrubbing, when the page can produce one. */
+    var scrubPreview by mutableStateOf<ScrubPreview?>(null)
+        private set
+
+    /** False once the page has told us it cannot produce preview frames for this video. */
+    var scrubPreviewAvailable by mutableStateOf(true)
+        private set
+    /** What a long press landed on, while its sheet is open. */
+    var linkContext by mutableStateOf<LinkContext?>(null)
+        private set
+
     /** Live horizontal navigation drag, for the on-screen affordance. */
     var navGesture by mutableStateOf<NavGesture?>(null)
         private set
@@ -527,6 +551,8 @@ class BrowserViewModel @JvmOverloads constructor(
         if (!isMediaFullscreen) return
         isMediaFullscreen = false
         isImmersive = false
+        scrubPreview = null
+        scrubPreviewAvailable = true
         lockLandscapeForMedia = false
         showChrome()
         activeTab?.webView?.let { webView ->
@@ -556,6 +582,41 @@ class BrowserViewModel @JvmOverloads constructor(
 
     fun seekMedia(positionMs: Long) {
         activeTab?.webView?.let { mediaAgent.seekTo(it, positionMs) }
+    }
+
+    /** Seeks by a relative amount, clamped to whatever the stream will accept. */
+    fun nudgeMedia(deltaMs: Long) {
+        val state = media
+        if (!state.isSeekable && !state.hasLiveWindow) return
+        val lower = if (state.isSeekable) 0L else state.seekableStartMs
+        val upper = if (state.isSeekable) state.durationMs else state.seekableEndMs
+        seekMedia((state.positionMs + deltaMs).coerceIn(lower, maxOf(lower, upper)))
+    }
+
+    /** A preview frame from the page, or null meaning it cannot produce them for this video. */
+    internal fun onScrubPreview(frame: ScrubPreview?) {
+        if (frame == null) {
+            scrubPreviewAvailable = false
+            scrubPreview = null
+        } else {
+            scrubPreview = frame
+        }
+    }
+
+    fun beginScrub() {
+        scrubPreview = null
+        if (!scrubPreviewAvailable) return
+        activeTab?.webView?.let { mediaAgent.openScrubPreview(it) }
+    }
+
+    fun scrubTo(positionMs: Long) {
+        if (!scrubPreviewAvailable) return
+        activeTab?.webView?.let { mediaAgent.previewAt(it, positionMs) }
+    }
+
+    fun endScrub() {
+        scrubPreview = null
+        activeTab?.webView?.let { mediaAgent.closeScrubPreview(it) }
     }
 
     /** Returns to the live edge of a stream the viewer has scrubbed back from. */
@@ -733,6 +794,8 @@ class BrowserViewModel @JvmOverloads constructor(
                 SettingToggle.BLOCK_3P_COOKIES -> settingsStore.setBlockThirdPartyCookies(value)
                 SettingToggle.DNT -> settingsStore.setDoNotTrack(value)
                 SettingToggle.AUTOPLAY -> settingsStore.setAutoplay(value)
+                SettingToggle.BLOCK_ADS -> settingsStore.setBlockAds(value)
+                SettingToggle.BLOCK_POPUPS -> settingsStore.setBlockPopups(value)
                 SettingToggle.ROTATE_FOR_VIDEO -> {
                     settingsStore.setRotateForVideo(value)
                     if (!value) lockLandscapeForMedia = false
@@ -759,6 +822,7 @@ class BrowserViewModel @JvmOverloads constructor(
         tabManager.tabs.forEach { tab ->
             val webView = tab.webView ?: return@forEach
             runCatching { WebViewConfigurator.configure(webView, current, tab.isDesktopMode) }
+            runCatching { cosmeticFilter.apply(webView, tab, current.blockAds) }
         }
     }
 
@@ -832,8 +896,10 @@ class BrowserViewModel @JvmOverloads constructor(
                 target.isLoading = true
                 target.errorMessage = null
                 target.progress = 0.02f
-                // A new document has no media until its agent says otherwise.
+                // A new document has no media, and no blocked requests, until it says so.
                 target.media = MediaState.NONE
+                target.blockedCount = 0
+                popupGuard.clear()
                 if (target.id == tabManager.activeTabId) exitMediaFullscreen()
             },
             pageFinished = { target, url, title ->
@@ -855,6 +921,9 @@ class BrowserViewModel @JvmOverloads constructor(
             onSslPrompt = { message, proceed, cancel ->
                 sslPrompt = SslPrompt(message, proceed, cancel)
             },
+            blocker = contentBlocker,
+            blockingEnabled = { settings.value.blockAds },
+            onRequestBlocked = { tab.blockedCount++ },
         )
 
         webView.webChromeClient = SlateWebChromeClient(
@@ -887,12 +956,24 @@ class BrowserViewModel @JvmOverloads constructor(
 
         webView.navigationListener = navigationListenerFor(tab)
 
+        // Long press offers actions for links and images, and declines everything else so text
+        // selection, form fields and the platform's own text menu behave exactly as usual.
+        webView.setOnLongClickListener {
+            val target = tab.webView ?: return@setOnLongClickListener false
+            LinkContextResolver.resolve(target) { resolved ->
+                if (resolved != null && resolved.isActionable) linkContext = resolved
+            }
+            LinkContextResolver.isActionable(target)
+        }
+
         mediaAgent.install(webView)
         desktopMode.apply(webView, tab, tab.isDesktopMode)
+        cosmeticFilter.apply(webView, tab, settings.value.blockAds)
         webView.addJavascriptInterface(
             mediaAgent.Bridge(
                 onState = { state -> onMediaState(tab, state) },
                 onNavigationHint = { suppress -> onNavigationHint(tab, suppress) },
+                onPreview = { frame -> onScrubPreview(frame) },
                 onEnterResult = { success ->
                     if (!success && isMediaFullscreen) {
                         exitMediaFullscreen()
@@ -954,6 +1035,28 @@ class BrowserViewModel @JvmOverloads constructor(
      * A page agent found something under the finger that pans horizontally by itself, so the
      * navigation gesture must stand down for this touch.
      */
+    fun dismissLinkContext() {
+        linkContext = null
+    }
+
+    fun copyToClipboard(text: String, label: String) {
+        val clipboard = activityContext?.getSystemService(ClipboardManager::class.java)
+            ?: return snack("Couldn't copy that")
+        clipboard.setPrimaryClip(ClipData.newPlainText(label, text))
+        // Android 13 and later shows its own copy confirmation; a second one would be noise.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) snack("Copied")
+    }
+
+    /** Saves an image the user pressed and held, through the same path as any other download. */
+    fun saveImage(url: String) {
+        val webView = activeTab?.webView
+        if (url.startsWith("blob:") || url.startsWith("data:")) {
+            downloads?.enqueue(url, webView?.settings?.userAgentString, null, null)
+            return
+        }
+        downloads?.enqueue(url, webView?.settings?.userAgentString, null, null)
+    }
+
     private fun onNavigationHint(tab: Tab, suppress: Boolean) {
         (tab.webView as? SlateWebView)?.suppressNavigationGesture = suppress
     }
@@ -962,21 +1065,38 @@ class BrowserViewModel @JvmOverloads constructor(
      * A page asked to open a window. The transport WebView must be handed back synchronously,
      * so the tab is created immediately and only foregrounded when the user meant it.
      */
+    /**
+     * A page asked to open a window.
+     *
+     * A window the user asked for opens and takes focus. A window the page opened on its own is
+     * refused outright rather than parked in the background: pop-unders and redirect chains
+     * depend on the window existing at all, and one the user never sees is one they cannot
+     * close. The snackbar keeps the decision reversible, so a site that genuinely needs a
+     * popup — a payment flow, an OAuth window — is one tap away.
+     */
     private fun openWindow(resultMsg: Message, isUserGesture: Boolean): Boolean {
         val transport = resultMsg.obj as? WebView.WebViewTransport ?: return false
+
+        if (!isUserGesture && settings.value.blockPopups) {
+            activeTab?.let { it.blockedCount++ }
+            popupGuard.refuse(resultMsg) { blockedUrl ->
+                snack("Pop-up blocked: ${UrlUtils.displayHost(blockedUrl)}", "Show") {
+                    openInNewTab(blockedUrl)
+                }
+            }
+            return true
+        }
+
         val newTab = Tab(desktopMode = settings.value.desktopModeByDefault)
         val webView = buildWebView(newTab)
         newTab.webView = webView
         transport.webView = webView
         resultMsg.sendToTarget()
-
         tabManager.adoptTab(newTab, select = isUserGesture)
-        if (!isUserGesture) {
-            // Unrequested popups stay in the background and say so, rather than stealing focus.
-            snack("Blocked pop-up opened in a background tab")
-        }
         return true
     }
+
+
 
     private fun requireHost(): BrowserHost = host ?: NoOpHost
 

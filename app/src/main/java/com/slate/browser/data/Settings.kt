@@ -38,6 +38,8 @@ data class Settings(
     val blockThirdPartyCookies: Boolean = false,
     val doNotTrack: Boolean = true,
     val allowAutoplay: Boolean = false,
+    val blockAds: Boolean = true,
+    val blockPopups: Boolean = true,
     val rotateForVideo: Boolean = true,
     val restoreTabs: Boolean = true,
     val saveHistory: Boolean = true,
@@ -60,6 +62,8 @@ class SettingsStore(private val context: Context) {
             blockThirdPartyCookies = p[Keys.BLOCK_3P_COOKIES] ?: false,
             doNotTrack = p[Keys.DNT] ?: true,
             allowAutoplay = p[Keys.AUTOPLAY] ?: false,
+            blockAds = p[Keys.BLOCK_ADS] ?: true,
+            blockPopups = p[Keys.BLOCK_POPUPS] ?: true,
             rotateForVideo = p[Keys.ROTATE_FOR_VIDEO] ?: true,
             restoreTabs = p[Keys.RESTORE_TABS] ?: true,
             saveHistory = p[Keys.SAVE_HISTORY] ?: true,
@@ -77,6 +81,8 @@ class SettingsStore(private val context: Context) {
     suspend fun setBlockThirdPartyCookies(enabled: Boolean) = put(Keys.BLOCK_3P_COOKIES, enabled)
     suspend fun setDoNotTrack(enabled: Boolean) = put(Keys.DNT, enabled)
     suspend fun setAutoplay(enabled: Boolean) = put(Keys.AUTOPLAY, enabled)
+    suspend fun setBlockAds(enabled: Boolean) = put(Keys.BLOCK_ADS, enabled)
+    suspend fun setBlockPopups(enabled: Boolean) = put(Keys.BLOCK_POPUPS, enabled)
     suspend fun setRotateForVideo(enabled: Boolean) = put(Keys.ROTATE_FOR_VIDEO, enabled)
     suspend fun setRestoreTabs(enabled: Boolean) = put(Keys.RESTORE_TABS, enabled)
     suspend fun setSaveHistory(enabled: Boolean) = put(Keys.SAVE_HISTORY, enabled)
@@ -97,6 +103,8 @@ class SettingsStore(private val context: Context) {
         val BLOCK_3P_COOKIES = booleanPreferencesKey("block_3p_cookies")
         val DNT = booleanPreferencesKey("dnt")
         val AUTOPLAY = booleanPreferencesKey("autoplay")
+        val BLOCK_ADS = booleanPreferencesKey("block_ads")
+        val BLOCK_POPUPS = booleanPreferencesKey("block_popups")
         val ROTATE_FOR_VIDEO = booleanPreferencesKey("rotate_for_video")
         val RESTORE_TABS = booleanPreferencesKey("restore_tabs")
         val SAVE_HISTORY = booleanPreferencesKey("save_history")
