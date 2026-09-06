@@ -41,16 +41,48 @@ class TabManagerTest {
     }
 
     @Test
-    fun `opening a tab selects it and notifies`() {
-        val tab = manager.openTab("https://example.com")
-        assertEquals(1, manager.count)
-        assertEquals(tab.id, manager.activeTabId)
+    fun `creating a tab never changes which tab is on screen`() {
+        val first = manager.createTab("https://first.test")
+        manager.select(first.id)
+
+        // The whole point of the split: creation is not selection, so a background tab cannot
+        // move the user however the caller happens to be written.
+        val second = manager.createTab("https://second.test")
+        val third = manager.createTab("https://third.test")
+
+        assertEquals(3, manager.count)
+        assertEquals("still looking at the first tab", first.id, manager.activeTabId)
+        assertNotNull(second)
+        assertNotNull(third)
         assertTrue(changes > 0)
     }
 
     @Test
+    fun `selecting is the only thing that moves the user`() {
+        val first = manager.createTab("https://first.test")
+        manager.select(first.id)
+        val second = manager.createTab("https://second.test")
+        assertEquals(first.id, manager.activeTabId)
+
+        manager.select(second.id)
+        assertEquals(second.id, manager.activeTabId)
+    }
+
+    @Test
+    fun `a background tab does not disturb the live webview of the tab on screen`() {
+        val first = manager.createTab("https://first.test")
+        manager.select(first.id)
+        val live = manager.webViewFor(first)
+
+        repeat(3) { manager.createTab("https://background.test/" + it) }
+
+        assertSame("the page on screen must be left exactly as it was", live, first.webView)
+        assertEquals(first.id, manager.activeTabId)
+    }
+
+    @Test
     fun `at most four webviews stay live`() {
-        repeat(8) { index -> manager.openTab("https://example.com/$index") }
+        repeat(8) { index -> manager.select(manager.createTab("https://example.com/$index").id) }
         manager.tabs.forEach { manager.webViewFor(it) }
 
         val live = manager.tabs.count { it.webView != null }
@@ -60,7 +92,8 @@ class TabManagerTest {
 
     @Test
     fun `a hibernated tab keeps its url and comes back`() {
-        val first = manager.openTab("https://first.test")
+        val first = manager.createTab("https://first.test")
+        manager.select(first.id)
         manager.webViewFor(first)
         assertNotNull(first.webView)
 
@@ -74,9 +107,10 @@ class TabManagerTest {
 
     @Test
     fun `closing the selected tab focuses its left neighbour`() {
-        val a = manager.openTab("https://a.test")
-        val b = manager.openTab("https://b.test")
-        val c = manager.openTab("https://c.test")
+        val a = manager.createTab("https://a.test")
+        val b = manager.createTab("https://b.test")
+        val c = manager.createTab("https://c.test")
+        manager.select(c.id)
         manager.select(b.id)
 
         manager.close(b.id)
@@ -88,7 +122,8 @@ class TabManagerTest {
 
     @Test
     fun `a closed tab can be reopened`() {
-        val tab = manager.openTab("https://example.com")
+        val tab = manager.createTab("https://example.com")
+        manager.select(tab.id)
         tab.url = "https://example.com"
         manager.close(tab.id)
         assertTrue(manager.canUndoClose)
@@ -101,8 +136,8 @@ class TabManagerTest {
 
     @Test
     fun `closing every tab leaves nothing selected`() {
-        manager.openTab("https://a.test")
-        manager.openTab("https://b.test")
+        manager.createTab("https://a.test")
+        manager.createTab("https://b.test")
         manager.closeAll()
         assertEquals(0, manager.count)
         assertNull(manager.activeTabId)
@@ -129,8 +164,8 @@ class TabManagerTest {
 
     @Test
     fun `a snapshot round-trips through restore`() {
-        manager.openTab("https://a.test")
-        manager.openTab("https://b.test")
+        manager.select(manager.createTab("https://a.test").id)
+        manager.select(manager.createTab("https://b.test").id)
         val snapshot = manager.snapshot()
 
         val other = TabManager(createWebView = { WebView(context) }, onTabsChanged = {})
@@ -143,8 +178,9 @@ class TabManagerTest {
 
     @Test
     fun `hibernating the inactive tabs spares the active one`() {
-        val a = manager.openTab("https://a.test")
-        val b = manager.openTab("https://b.test")
+        val a = manager.createTab("https://a.test")
+        val b = manager.createTab("https://b.test")
+        manager.select(a.id)
         manager.webViewFor(a)
         manager.webViewFor(b)
         manager.select(b.id)
@@ -156,7 +192,8 @@ class TabManagerTest {
 
     @Test
     fun `rebinding to a different context releases the old webviews`() {
-        val tab = manager.openTab("https://a.test")
+        val tab = manager.createTab("https://a.test")
+        manager.select(tab.id)
         val original = manager.webViewFor(tab)
         assertSame(original, tab.webView)
 
@@ -166,10 +203,14 @@ class TabManagerTest {
     }
 
     @Test
-    fun `an adopted popup joins the strip`() {
+    fun `an adopted popup joins the strip without taking over`() {
+        val existing = manager.createTab("https://page.test")
+        manager.select(existing.id)
+
         val popup = Tab(initialUrl = "https://popup.test")
-        manager.adoptTab(popup, select = false)
-        assertEquals(1, manager.count)
-        assertNull(manager.activeTabId)
+        manager.adoptTab(popup)
+
+        assertEquals(2, manager.count)
+        assertEquals("a window a page opened must not steal the screen", existing.id, manager.activeTabId)
     }
 }

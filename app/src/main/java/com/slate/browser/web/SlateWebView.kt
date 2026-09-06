@@ -50,6 +50,9 @@ class SlateWebView(context: Context) : WebView(context) {
     @Volatile
     var suppressNavigationGesture: Boolean = false
 
+    /** Told about every real touch, so page navigation can be judged against actual input. */
+    var userActivation: UserActivation? = null
+
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
 
     private var downX = 0f
@@ -69,6 +72,7 @@ class SlateWebView(context: Context) : WebView(context) {
                 downY = event.y
                 decided = false
                 owning = false
+                userActivation?.recordTouch()
             }
 
             // A second finger means pinch-zoom or a two-finger pan, never navigation.

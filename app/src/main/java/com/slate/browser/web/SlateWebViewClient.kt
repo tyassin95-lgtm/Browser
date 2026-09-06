@@ -30,6 +30,9 @@ class SlateWebViewClient(
     private val blocker: ContentBlocker,
     private val blockingEnabled: () -> Boolean,
     private val onRequestBlocked: () -> Unit,
+    private val policy: NavigationPolicy,
+    private val onNavigationBlocked: (String, String) -> Unit,
+    private val onConfirmExternal: (String, String) -> Unit,
 ) : WebViewClient() {
 
     /**
@@ -47,25 +50,42 @@ class SlateWebViewClient(
         return blocker.blockedResponse(request)
     }
 
+    /**
+     * Every navigation a page attempts goes through one policy, so there is a single place that
+     * decides and a single place to look when something is wrong.
+     */
     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
         val url = request.url.toString()
+        val decision = policy.decide(
+            url = url,
+            isMainFrame = request.isForMainFrame,
+            hasGesture = request.hasGesture(),
+            isRedirect = request.isRedirect,
+            currentPageUrl = view.url,
+            blockingEnabled = blockingEnabled(),
+        )
+        return when (decision) {
+            is NavigationDecision.Allow -> false
 
-        // A navigation the user did not ask for, heading somewhere that exists to serve
-        // advertising, is the redirect hijack. A navigation they *did* ask for is left alone
-        // even if it goes to the same place, because that was their decision to make.
-        if (blockingEnabled() && !request.hasGesture() && blocker.isBlockedDestination(url)) {
-            blocker.recordBlock()
-            onRequestBlocked()
-            return true
+            is NavigationDecision.Block -> {
+                blocker.recordBlock()
+                onRequestBlocked()
+                onNavigationBlocked(url, decision.reason)
+                true
+            }
+
+            is NavigationDecision.KeepInBrowser -> {
+                // An app hand-off carrying an ordinary web address: keep the address, refuse
+                // the hand-off. This is how a page moves the user into another browser.
+                tab.webView?.loadUrl(decision.url)
+                true
+            }
+
+            is NavigationDecision.ConfirmExternal -> {
+                onConfirmExternal(decision.url, decision.label)
+                true
+            }
         }
-
-        if (UrlUtils.isHttpLike(url)) return false
-
-        // App-store and deep-link jumps out of the browser are only ever legitimate when the
-        // user actually touched something.
-        if (!request.hasGesture() && !request.isForMainFrame) return true
-
-        return handleExternal(url)
     }
 
     private fun handleExternal(url: String): Boolean {

@@ -45,6 +45,16 @@ class Tab(
         internal set
     var errorMessage by mutableStateOf<String?>(null)
         internal set
+    /**
+     * Whether this tab is showing the browser's chrome.
+     *
+     * Per tab, and never inherited: a tab that scrolled its toolbar away must not hand that
+     * state to a tab the user has just opened or switched to, which on a page with nothing to
+     * scroll would leave them with no way to get it back.
+     */
+    var chromeVisible by mutableStateOf(true)
+        internal set
+
     /** How many requests this page had refused, reset on every navigation. */
     var blockedCount by mutableIntStateOf(0)
         internal set

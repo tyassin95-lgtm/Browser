@@ -98,6 +98,7 @@ fun MediaFullscreenOverlay(
     onVolume: (Float) -> Unit,
     modifier: Modifier = Modifier,
     scrubPreview: ScrubPreview? = null,
+    scrubbingMovesVideo: Boolean = false,
     onScrubStart: () -> Unit = {},
     onScrubTo: (Long) -> Unit = {},
     onScrubEnd: () -> Unit = {},
@@ -198,6 +199,7 @@ fun MediaFullscreenOverlay(
                         media = media,
                         showVolume = showVolume,
                         scrubPreview = scrubPreview,
+                        scrubbingMovesVideo = scrubbingMovesVideo,
                         onScrubStart = onScrubStart,
                         onScrubTo = onScrubTo,
                         onScrubEnd = onScrubEnd,
@@ -268,6 +270,7 @@ private fun TransportBar(
     media: MediaState,
     showVolume: Boolean,
     scrubPreview: ScrubPreview?,
+    scrubbingMovesVideo: Boolean,
     onScrubStart: () -> Unit,
     onScrubTo: (Long) -> Unit,
     onScrubEnd: () -> Unit,
@@ -299,6 +302,7 @@ private fun TransportBar(
             val span = (end - start).coerceAtLeast(1f)
             ScrubPreviewCard(
                 preview = scrubPreview,
+                movesVideo = scrubbingMovesVideo,
                 positionMs = scrubPosition.toLong(),
                 isLive = media.isLive,
                 behindLiveMs = (end - scrubPosition).toLong(),
@@ -514,6 +518,7 @@ private fun scrimGradient() = androidx.compose.ui.graphics.Brush.verticalGradien
 @Composable
 private fun ScrubPreviewCard(
     preview: ScrubPreview?,
+    movesVideo: Boolean,
     positionMs: Long,
     isLive: Boolean,
     behindLiveMs: Long,
@@ -521,7 +526,9 @@ private fun ScrubPreviewCard(
     modifier: Modifier = Modifier,
 ) {
     BoxWithConstraints(modifier) {
-        val cardWidth = if (preview != null) PREVIEW_WIDTH else TIME_BUBBLE_WIDTH
+        // With no thumbnail the video itself is moving behind the scrubber, so the card shrinks
+        // to the timestamp rather than reserving space for a picture that is not coming.
+        val cardWidth = if (preview != null && !movesVideo) PREVIEW_WIDTH else TIME_BUBBLE_WIDTH
         val travel = (maxWidth - cardWidth).coerceAtLeast(0.dp)
         Column(
             Modifier
@@ -531,7 +538,7 @@ private fun ScrubPreviewCard(
                 .background(Color.Black.copy(alpha = 0.72f)),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            preview?.let { frame ->
+            preview?.takeIf { !movesVideo }?.let { frame ->
                 Image(
                     bitmap = frame.frame.asImageBitmap(),
                     contentDescription = null,

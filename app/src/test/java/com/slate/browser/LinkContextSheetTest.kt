@@ -33,6 +33,7 @@ class LinkContextSheetTest {
     @get:Rule val compose = createComposeRule()
 
     private var opened = 0
+    private var openedInBackground = 0
     private var savedImage = 0
 
     @OptIn(ExperimentalMaterial3Api::class)
@@ -45,8 +46,8 @@ class LinkContextSheetTest {
                     onDismiss = {},
                     actions = LinkContextActions(
                         onOpen = { opened++ },
-                        onOpenNewTab = {},
-                        onOpenBackgroundTab = {},
+                        onOpenInNewTab = { openedInBackground++ },
+                        onOpenInNewTabAndSwitch = {},
                         onCopyLink = {},
                         onShareLink = {},
                         onOpenImage = {},
@@ -66,7 +67,7 @@ class LinkContextSheetTest {
         show(LinkContext(linkUrl = "https://example.com/article"))
 
         compose.onNodeWithText("Open in new tab").assertIsDisplayed()
-        compose.onNodeWithText("Open in background tab").assertIsDisplayed()
+        compose.onNodeWithText("Open and switch").assertIsDisplayed()
         compose.onNodeWithText("Copy link").assertIsDisplayed()
         compose.onNodeWithText("Share link").assertIsDisplayed()
 
@@ -120,6 +121,11 @@ class LinkContextSheetTest {
         compose.onNodeWithText("Save image").performSemanticsAction(SemanticsActions.OnClick)
         compose.waitForIdle()
         assertEquals(1, savedImage)
+
+        // "Open in new tab" says nothing about going there, and does not.
+        compose.onNodeWithText("Open in new tab").performSemanticsAction(SemanticsActions.OnClick)
+        compose.waitForIdle()
+        assertEquals(1, openedInBackground)
     }
 
     @Test

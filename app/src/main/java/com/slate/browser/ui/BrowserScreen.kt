@@ -66,6 +66,7 @@ import com.slate.browser.Overlay
 import com.slate.browser.data.Suggestion
 import com.slate.browser.web.MediaFit
 import com.slate.browser.web.NavigationDirection
+import com.slate.browser.web.ScrubPreviewMode
 import com.slate.browser.ui.components.FindBar
 import com.slate.browser.ui.components.FullscreenHost
 import com.slate.browser.ui.components.LandscapeBar
@@ -363,11 +364,11 @@ fun BrowserScreen(
             onDismiss = viewModel::dismissLinkContext,
             actions = LinkContextActions(
                 onOpen = { context.linkUrl?.let(viewModel::load) },
-                onOpenNewTab = { context.linkUrl?.let(viewModel::openInNewTab) },
-                onOpenBackgroundTab = { context.linkUrl?.let(viewModel::openInBackgroundTab) },
+                onOpenInNewTab = { context.linkUrl?.let(viewModel::openInBackgroundTab) },
+                onOpenInNewTabAndSwitch = { context.linkUrl?.let(viewModel::openInNewTabAndSwitch) },
                 onCopyLink = { context.linkUrl?.let { viewModel.copyToClipboard(it, "Link") } },
                 onShareLink = { context.linkUrl?.let { onShare(it, it) } },
-                onOpenImage = { context.imageUrl?.let(viewModel::openInNewTab) },
+                onOpenImage = { context.imageUrl?.let(viewModel::openInBackgroundTab) },
                 onSaveImage = { context.imageUrl?.let(viewModel::saveImage) },
                 onCopyImageAddress = {
                     context.imageUrl?.let { viewModel.copyToClipboard(it, "Image address") }

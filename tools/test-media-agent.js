@@ -529,51 +529,174 @@ test('a portrait stream is reported as portrait so the phone is not rotated', as
   assert.strictEqual(last.h, 1280);
 });
 
+// ------------------------------------------------------------ seeking
+
+/** Gives a video a settable clock and a seekable range, the way a real element has. */
+function makeSeekable(v, { at = 0, duration = 300, start = 0, end = 300 } = {}) {
+  let time = at;
+  Object.defineProperty(v, 'currentTime', {
+    get: () => time, set: (t) => { time = t; }, configurable: true,
+  });
+  Object.defineProperty(v, 'duration', { value: duration, configurable: true });
+  Object.defineProperty(v, 'seekable', {
+    value: { length: 1, start: () => start, end: () => end }, configurable: true,
+  });
+  return () => time;
+}
+
+test('an absolute seek moves the video', async () => {
+  const { win, doc } = createPage('<video id="v"></video>');
+  const v = describeVideo(doc.getElementById('v'), { width: 640, height: 360, paused: false });
+  const at = makeSeekable(v, { at: 42 });
+
+  win.__slateMedia.command('enter', 'contain');
+  await delay(ENTER_SETTLE_MS);
+  win.__slateMedia.command('seek', '120');
+  assert.strictEqual(at(), 120);
+});
+
+test('a relative seek is applied to where the video actually is', async () => {
+  // Resolved here rather than in the browser, whose copy of the position is only as fresh as
+  // the last report. Computing from that copy is why the gesture animated without seeking.
+  const { win, doc } = createPage('<video id="v"></video>');
+  const v = describeVideo(doc.getElementById('v'), { width: 640, height: 360, paused: false });
+  const at = makeSeekable(v, { at: 100 });
+
+  win.__slateMedia.command('enter', 'contain');
+  await delay(ENTER_SETTLE_MS);
+
+  win.__slateMedia.command('seekBy', '-10');
+  assert.strictEqual(at(), 90);
+  win.__slateMedia.command('seekBy', '-10');
+  assert.strictEqual(at(), 80, 'repeated taps accumulate because each reads the real position');
+  win.__slateMedia.command('seekBy', '10');
+  assert.strictEqual(at(), 90);
+});
+
+test('a seek is clamped to what the stream will accept', async () => {
+  const { win, doc } = createPage('<video id="v"></video>');
+  const v = describeVideo(doc.getElementById('v'), { width: 640, height: 360, paused: false });
+  const at = makeSeekable(v, { at: 5, duration: 60, start: 0, end: 60 });
+
+  win.__slateMedia.command('enter', 'contain');
+  await delay(ENTER_SETTLE_MS);
+
+  win.__slateMedia.command('seekBy', '-30');
+  assert.strictEqual(at(), 0, 'never before the beginning');
+  win.__slateMedia.command('seekBy', '600');
+  assert.strictEqual(at(), 60, 'never past the end');
+});
+
+test('a live stream is seeked only within its rewind window', async () => {
+  const { win, doc } = createPage('<video id="v"></video>');
+  const v = describeVideo(doc.getElementById('v'), { width: 640, height: 360, paused: false, live: true });
+  const at = makeSeekable(v, { at: 300, duration: Infinity, start: 60, end: 360 });
+
+  win.__slateMedia.command('enter', 'contain');
+  await delay(ENTER_SETTLE_MS);
+
+  win.__slateMedia.command('seekBy', '-600');
+  assert.strictEqual(at(), 60, 'clamped to the start of the buffer, not to zero');
+  win.__slateMedia.command('seekBy', '600');
+  assert.strictEqual(at(), 360, 'and never past the live edge');
+});
+
+test('seeking reports the new position at once', async () => {
+  const { win, doc, reports } = createPage('<video id="v"></video>');
+  const v = describeVideo(doc.getElementById('v'), { width: 640, height: 360, paused: false });
+  makeSeekable(v, { at: 10 });
+
+  win.__slateMedia.command('enter', 'contain');
+  await delay(ENTER_SETTLE_MS);
+  win.__slateMedia.command('seekBy', '30');
+
+  const last = reports[reports.length - 1];
+  assert.strictEqual(last.t, 40, 'the transport must agree with the video immediately');
+});
+
+test('a relative seek reaches a video inside an embedded player', async () => {
+  const page = createPage('<p>host</p>');
+  const frame = addFrame(page, '<video id="v"></video>');
+  const v = describeVideo(frame.doc.getElementById('v'), { width: 320, height: 180, paused: false });
+  const at = makeSeekable(v, { at: 50 });
+
+  page.win.__slateMedia.command('enter', 'contain');
+  await delay(ENTER_SETTLE_MS);
+  page.win.__slateMedia.command('seekBy', '-10');
+  await delay(80);
+
+  assert.strictEqual(at(), 40, 'the offset has to cross the frame boundary intact');
+});
+
 // ------------------------------------------------------- scrub previews
 
-test('a stream assembled by Media Source reports that it cannot be previewed', async () => {
-  // A blob: source belongs to one element and cannot be handed to a second one, so there is
-  // nothing to seek and draw. Saying so once is what lets the browser fall back cleanly.
-  const { win, doc, previews } = createPage('<video id="v"></video>');
+test('a Media Source stream scrubs the playing video instead of sampling a copy', async () => {
+  // A blob: source belongs to one element and cannot be handed to a second, so there is nothing
+  // to sample. Moving the real video makes the fullscreen picture itself the preview.
+  const { win, doc, modes } = createPage('<video id="v"></video>');
   const v = describeVideo(doc.getElementById('v'), { width: 640, height: 360, paused: false });
+  const at = makeSeekable(v, { at: 10 });
   Object.defineProperty(v, 'currentSrc', { value: 'blob:https://example.test/abc', configurable: true });
 
   win.__slateMedia.command('enter', 'contain');
   await delay(ENTER_SETTLE_MS);
   win.__slateMedia.command('previewOpen');
-  await delay(120);
+  await delay(80);
 
-  assert.strictEqual(previews.length, 1);
-  assert.strictEqual(previews[0].data, '', 'an empty payload means "cannot preview"');
+  assert.strictEqual(modes[modes.length - 1], 'inplace');
+
+  win.__slateMedia.command('previewAt', '95');
+  assert.strictEqual(at(), 95, 'the picture follows the finger');
 });
 
-test('a video with no source at all reports the same', async () => {
-  const { win, doc, previews } = createPage('<video id="v"></video>');
-  const v = describeVideo(doc.getElementById('v'), { width: 640, height: 360, paused: false });
-  Object.defineProperty(v, 'currentSrc', { value: '', configurable: true });
+test('a video with nothing to seek through offers no preview at all', async () => {
+  const { win, doc, modes } = createPage('<video id="v"></video>');
+  const v = describeVideo(doc.getElementById('v'), { width: 640, height: 360, paused: false, live: true });
+  Object.defineProperty(v, 'seekable', { value: { length: 0 }, configurable: true });
+  Object.defineProperty(v, 'duration', { value: Infinity, configurable: true });
 
   win.__slateMedia.command('enter', 'contain');
   await delay(ENTER_SETTLE_MS);
   win.__slateMedia.command('previewOpen');
-  await delay(120);
+  await delay(80);
 
-  assert.strictEqual(previews[previews.length - 1].data, '');
+  assert.strictEqual(modes[modes.length - 1], 'none');
 });
 
-test('scrubbing a source that cannot be previewed never breaks playback', async () => {
+test('in-place scrubbing is rate limited so the decoder is not thrashed', async () => {
   const { win, doc } = createPage('<video id="v"></video>');
   const v = describeVideo(doc.getElementById('v'), { width: 640, height: 360, paused: false });
+  const at = makeSeekable(v, { at: 0 });
+  Object.defineProperty(v, 'currentSrc', { value: 'blob:https://example.test/abc', configurable: true });
+
+  win.__slateMedia.command('enter', 'contain');
+  await delay(ENTER_SETTLE_MS);
+  win.__slateMedia.command('previewOpen');
+  await delay(80);
+
+  // A drag delivers far more positions than a decoder can honour.
+  for (let i = 1; i <= 40; i++) win.__slateMedia.command('previewAt', String(i));
+  assert.strictEqual(at(), 1, 'only the first of a burst is honoured');
+
+  await delay(200);
+  win.__slateMedia.command('previewAt', '99');
+  assert.strictEqual(at(), 99, 'and the next one lands once the rate allows');
+});
+
+test('scrubbing never breaks the playing video', async () => {
+  const { win, doc } = createPage('<video id="v"></video>');
+  const v = describeVideo(doc.getElementById('v'), { width: 640, height: 360, paused: false });
+  makeSeekable(v, { at: 0 });
   Object.defineProperty(v, 'currentSrc', { value: 'blob:https://example.test/abc', configurable: true });
 
   win.__slateMedia.command('enter', 'contain');
   await delay(ENTER_SETTLE_MS);
   win.__slateMedia.command('previewOpen');
   win.__slateMedia.command('previewAt', '12.5');
-  win.__slateMedia.command('previewAt', '30');
   win.__slateMedia.command('previewClose');
   await delay(120);
 
-  assert.strictEqual(v.paused, false, 'the video that is playing must be untouched');
+  assert.strictEqual(v.paused, false, 'the video that is playing must keep playing');
   assert.strictEqual(styleOf(doc.getElementById('v'), 'position'), 'fixed');
 });
 

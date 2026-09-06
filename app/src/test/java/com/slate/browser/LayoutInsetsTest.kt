@@ -60,7 +60,14 @@ class LayoutInsetsTest {
     @Before
     fun setUp() {
         val app = ApplicationProvider.getApplicationContext<Application>()
-        db = Room.inMemoryDatabaseBuilder(app, AppDatabase::class.java).allowMainThreadQueries().build()
+        db = Room.inMemoryDatabaseBuilder(app, AppDatabase::class.java)
+            // Same-thread executors: Room's own flow teardown then completes inline during
+            // cancellation, instead of landing on a background thread after the database has
+            // been closed and surfacing in whichever test happens to run next.
+            .setQueryExecutor { it.run() }
+            .setTransactionExecutor { it.run() }
+            .allowMainThreadQueries()
+            .build()
         File(app.filesDir, "session.json").delete()
         val factory = viewModelFactory {
             initializer { BrowserViewModel(app, repository = BrowserRepository(db)) }

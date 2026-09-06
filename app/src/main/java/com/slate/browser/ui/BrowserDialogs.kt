@@ -90,6 +90,29 @@ fun BrowserDialogs(viewModel: BrowserViewModel) {
         )
     }
 
+    viewModel.externalLaunch?.let { request ->
+        AlertDialog(
+            onDismissRequest = viewModel::dismissExternalLaunch,
+            title = { Text("Leave the browser?") },
+            text = {
+                Column {
+                    Text("This page wants to open another app.")
+                    Text(
+                        request.url,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = viewModel::confirmExternalLaunch) { Text("Open") }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::dismissExternalLaunch) { Text("Stay here") }
+            },
+        )
+    }
+
     viewModel.sslPrompt?.let { prompt ->
         val dismiss = viewModel::dismissSslPrompt
         AlertDialog(

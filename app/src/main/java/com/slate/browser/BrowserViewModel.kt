@@ -39,7 +39,9 @@ import com.slate.browser.util.UrlUtils
 import com.slate.browser.web.BrowserHost
 import com.slate.browser.web.ContentBlocker
 import com.slate.browser.web.CosmeticFilter
+import com.slate.browser.web.NavigationPolicy
 import com.slate.browser.web.PopupGuard
+import com.slate.browser.web.UserActivation
 import com.slate.browser.web.DesktopMode
 import com.slate.browser.web.DownloadCoordinator
 import com.slate.browser.web.FaviconStore
@@ -49,6 +51,7 @@ import com.slate.browser.web.LinkContext
 import com.slate.browser.web.LinkContextResolver
 import com.slate.browser.web.MediaState
 import com.slate.browser.web.ScrubPreview
+import com.slate.browser.web.ScrubPreviewMode
 import com.slate.browser.web.NavigationDirection
 import com.slate.browser.web.NavigationGestureListener
 import com.slate.browser.web.SlateWebView
@@ -106,6 +109,8 @@ class BrowserViewModel @JvmOverloads constructor(
     private val contentBlocker = ContentBlocker(app)
     private val popupGuard = PopupGuard(app)
     private val cosmeticFilter = CosmeticFilter()
+    private val userActivation = UserActivation()
+    private val navigationPolicy = NavigationPolicy(contentBlocker, userActivation)
 
     /** How far a swipe must travel to commit, in pixels, resolved once from the display. */
     private val gestureCommitDistancePx =
@@ -172,9 +177,13 @@ class BrowserViewModel @JvmOverloads constructor(
     var scrubPreview by mutableStateOf<ScrubPreview?>(null)
         private set
 
-    /** False once the page has told us it cannot produce preview frames for this video. */
-    var scrubPreviewAvailable by mutableStateOf(true)
+    /** What the page can offer while scrubbing this source. */
+    var scrubPreviewMode by mutableStateOf(ScrubPreviewMode.NONE)
         private set
+    /** A page asking to leave the browser, waiting on the user to say whether it may. */
+    var externalLaunch by mutableStateOf<ExternalLaunch?>(null)
+        private set
+
     /** What a long press landed on, while its sheet is open. */
     var linkContext by mutableStateOf<LinkContext?>(null)
         private set
@@ -185,8 +194,6 @@ class BrowserViewModel @JvmOverloads constructor(
 
     /** True while a landscape stream should hold the display sideways. */
     var lockLandscapeForMedia by mutableStateOf(false)
-        private set
-    var chromeVisible by mutableStateOf(true)
         private set
     var fullscreenView by mutableStateOf<View?>(null)
         private set
@@ -204,6 +211,13 @@ class BrowserViewModel @JvmOverloads constructor(
     private var fullscreenCallback: WebChromeClient.CustomViewCallback? = null
 
     val activeTab: Tab? get() = tabManager.activeTab
+
+    /**
+     * Whether the chrome is showing for the tab on screen. Fullscreen overrides it, and a tab
+     * with no tab at all shows it, so this can never resolve to "hidden with nothing to undo it".
+     */
+    val chromeVisible: Boolean
+        get() = !isImmersive && (activeTab?.chromeVisible ?: true)
 
     init {
         viewModelScope.launch {
@@ -234,7 +248,7 @@ class BrowserViewModel @JvmOverloads constructor(
     /** Called once, after [attach], to put the browser into a usable state. */
     fun bootstrap(initialUrl: String?) {
         if (tabManager.count > 0) {
-            if (initialUrl != null) openInNewTab(initialUrl)
+            if (initialUrl != null) openInNewTabAndSwitch(initialUrl)
             return
         }
         val restored = if (settings.value.restoreTabs) persistence.load() else null
@@ -242,7 +256,7 @@ class BrowserViewModel @JvmOverloads constructor(
             tabManager.restore(restored)
         }
         if (initialUrl != null) {
-            openInNewTab(initialUrl)
+            openInNewTabAndSwitch(initialUrl)
         } else if (tabManager.count == 0) {
             newTab(focusOmnibox = true)
         }
@@ -260,35 +274,51 @@ class BrowserViewModel @JvmOverloads constructor(
 
     // ---- Navigation ---------------------------------------------------------
 
+    /** A new empty tab the user asked for, which is therefore the one they want to be in. */
     fun newTab(url: String? = null, focusOmnibox: Boolean = url == null) {
-        exitMediaFullscreen()
-        captureThumbnail(activeTab)
         val home = url ?: settings.value.homePage.takeIf { it.isNotBlank() }
-        tabManager.openTab(home, desktopMode = settings.value.desktopModeByDefault)
-        overlay = Overlay.NONE
+        val tab = tabManager.createTab(home, desktopMode = settings.value.desktopModeByDefault)
+        switchTo(tab.id)
         if (focusOmnibox && home == null) focusOmnibox("") else blurOmnibox()
     }
 
-    fun openInNewTab(url: String) {
-        exitMediaFullscreen()
-        captureThumbnail(activeTab)
-        tabManager.openTab(url, desktopMode = settings.value.desktopModeByDefault)
-        overlay = Overlay.NONE
+    /**
+     * Opens a page in another tab without leaving the current one.
+     *
+     * This is the default for every "open in a new tab" in the browser, because that is what it
+     * says: the tab is created, and where the user is looking does not change. Only [switchTo]
+     * moves them, and only when something they did means to.
+     */
+    fun openInBackgroundTab(url: String) {
+        // The identity is captured now: by the time the action is tapped, other tabs may exist.
+        val created = tabManager.createTab(url, desktopMode = settings.value.desktopModeByDefault)
+        snack("Opened in background", "Switch") {
+            if (tabManager.tabs.any { it.id == created.id }) switchTo(created.id)
+        }
+    }
+
+    /** Opens a page in a new tab and goes there. For links the browser itself is following. */
+    fun openInNewTabAndSwitch(url: String) {
+        val tab = tabManager.createTab(url, desktopMode = settings.value.desktopModeByDefault)
+        switchTo(tab.id)
         blurOmnibox()
     }
 
-    fun openInBackgroundTab(url: String) {
-        tabManager.openTab(url, desktopMode = settings.value.desktopModeByDefault, select = false)
-        snack("Opened in a new tab")
-    }
+    fun selectTab(id: String) = switchTo(id)
 
-    fun selectTab(id: String) {
+    /**
+     * The single path by which the tab on screen changes. Everything that has to happen when the
+     * user moves between tabs happens here and nowhere else, so no caller can move them and
+     * forget half of it.
+     */
+    private fun switchTo(id: String) {
         exitMediaFullscreen()
         captureThumbnail(activeTab)
         tabManager.select(id)
         overlay = Overlay.NONE
         blurOmnibox()
-        showChrome()
+        // A tab arrives showing its chrome, whatever the tab being left had done with its own.
+        showChrome(tabManager.activeTab)
     }
 
     fun closeTab(id: String) {
@@ -313,7 +343,7 @@ class BrowserViewModel @JvmOverloads constructor(
     }
 
     fun load(input: String) {
-        val tab = activeTab ?: tabManager.openTab()
+        val tab = activeTab ?: tabManager.createTab().also { tabManager.select(it.id) }
         val url = UrlUtils.toLoadableUrl(input, settings.value.searchEngine)
         if (url.isBlank()) return
         exitMediaFullscreen()
@@ -471,16 +501,23 @@ class BrowserViewModel @JvmOverloads constructor(
         chromeSettleJob?.cancel()
         chromeSettleJob = viewModelScope.launch {
             delay(CHROME_SETTLE_MS)
-            chromeVisible = chromeScrollPolicy.desired
+            activeTab?.chromeVisible = chromeScrollPolicy.desired
         }
     }
 
-    /** Brings the chrome back for a reason other than scrolling, and forgets any pending move. */
-    private fun showChrome() {
+    /**
+     * Brings the chrome back and forgets any pending move.
+     *
+     * Called for every reason other than scrolling: navigation, tab creation, tab selection,
+     * entering and leaving fullscreen, focusing the omnibox. The invariant this maintains is
+     * that the only thing that can hide the chrome is the user scrolling a page that scrolls,
+     * and anything else at all restores it.
+     */
+    private fun showChrome(tab: Tab? = activeTab) {
         chromeSettleJob?.cancel()
         chromeSettleJob = null
         chromeScrollPolicy.reset(visible = true)
-        chromeVisible = true
+        tab?.chromeVisible = true
     }
 
     fun enterImmersive() {
@@ -552,7 +589,7 @@ class BrowserViewModel @JvmOverloads constructor(
         isMediaFullscreen = false
         isImmersive = false
         scrubPreview = null
-        scrubPreviewAvailable = true
+        scrubPreviewMode = ScrubPreviewMode.NONE
         lockLandscapeForMedia = false
         showChrome()
         activeTab?.webView?.let { webView ->
@@ -584,33 +621,41 @@ class BrowserViewModel @JvmOverloads constructor(
         activeTab?.webView?.let { mediaAgent.seekTo(it, positionMs) }
     }
 
-    /** Seeks by a relative amount, clamped to whatever the stream will accept. */
+    /**
+     * Seeks by a relative amount.
+     *
+     * The offset is sent as an offset: the page applies it to the element's own currentTime and
+     * clamps it to what the stream will accept. Resolving it here instead would compute from
+     * the position last reported, which is why a gesture could animate without the video
+     * moving, and why repeated taps would not accumulate.
+     */
     fun nudgeMedia(deltaMs: Long) {
         val state = media
         if (!state.isSeekable && !state.hasLiveWindow) return
-        val lower = if (state.isSeekable) 0L else state.seekableStartMs
-        val upper = if (state.isSeekable) state.durationMs else state.seekableEndMs
-        seekMedia((state.positionMs + deltaMs).coerceIn(lower, maxOf(lower, upper)))
+        activeTab?.webView?.let { mediaAgent.seekBy(it, deltaMs) }
     }
 
-    /** A preview frame from the page, or null meaning it cannot produce them for this video. */
+    /** A preview frame from the page. */
     internal fun onScrubPreview(frame: ScrubPreview?) {
-        if (frame == null) {
-            scrubPreviewAvailable = false
-            scrubPreview = null
-        } else {
-            scrubPreview = frame
-        }
+        scrubPreview = frame
+    }
+
+    internal fun onScrubPreviewMode(mode: ScrubPreviewMode) {
+        scrubPreviewMode = mode
     }
 
     fun beginScrub() {
         scrubPreview = null
-        if (!scrubPreviewAvailable) return
+        scrubPreviewMode = ScrubPreviewMode.NONE
         activeTab?.webView?.let { mediaAgent.openScrubPreview(it) }
     }
 
+    /**
+     * Follows the finger. What this does depends on what the source allows: it either fetches a
+     * thumbnail from a second element, or moves the playing video so the picture behind the
+     * scrubber is itself the preview.
+     */
     fun scrubTo(positionMs: Long) {
-        if (!scrubPreviewAvailable) return
         activeTab?.webView?.let { mediaAgent.previewAt(it, positionMs) }
     }
 
@@ -900,6 +945,8 @@ class BrowserViewModel @JvmOverloads constructor(
                 target.media = MediaState.NONE
                 target.blockedCount = 0
                 popupGuard.clear()
+                // A new document has scrolled nowhere, so its chrome starts where it should.
+                showChrome(target)
                 if (target.id == tabManager.activeTabId) exitMediaFullscreen()
             },
             pageFinished = { target, url, title ->
@@ -924,6 +971,9 @@ class BrowserViewModel @JvmOverloads constructor(
             blocker = contentBlocker,
             blockingEnabled = { settings.value.blockAds },
             onRequestBlocked = { tab.blockedCount++ },
+            policy = navigationPolicy,
+            onNavigationBlocked = { url, reason -> onNavigationBlocked(url, reason) },
+            onConfirmExternal = { url, label -> externalLaunch = ExternalLaunch(url, label) },
         )
 
         webView.webChromeClient = SlateWebChromeClient(
@@ -955,6 +1005,7 @@ class BrowserViewModel @JvmOverloads constructor(
         downloads?.let { webView.addJavascriptInterface(it.JsBridge(), "SlateDownload") }
 
         webView.navigationListener = navigationListenerFor(tab)
+        webView.userActivation = userActivation
 
         // Long press offers actions for links and images, and declines everything else so text
         // selection, form fields and the platform's own text menu behave exactly as usual.
@@ -974,6 +1025,7 @@ class BrowserViewModel @JvmOverloads constructor(
                 onState = { state -> onMediaState(tab, state) },
                 onNavigationHint = { suppress -> onNavigationHint(tab, suppress) },
                 onPreview = { frame -> onScrubPreview(frame) },
+                onPreviewMode = { mode -> scrubPreviewMode = mode },
                 onEnterResult = { success ->
                     if (!success && isMediaFullscreen) {
                         exitMediaFullscreen()
@@ -1035,6 +1087,31 @@ class BrowserViewModel @JvmOverloads constructor(
      * A page agent found something under the finger that pans horizontally by itself, so the
      * navigation gesture must stand down for this touch.
      */
+    /**
+     * A navigation the browser refused. Reported once per page rather than per attempt: a
+     * redirect loop can try dozens of times, and a notice per attempt is its own kind of abuse.
+     */
+    private fun onNavigationBlocked(url: String, reason: String) {
+        activeTab?.blockedCount = (activeTab?.blockedCount ?: 0) + 1
+        if (reason == "redirect") {
+            val host = UrlUtils.displayHost(url)
+            snack("Blocked a redirect to $host", "Allow") {
+                userActivation.recordTouch()
+                load(url)
+            }
+        }
+    }
+
+    fun confirmExternalLaunch() {
+        val request = externalLaunch ?: return
+        externalLaunch = null
+        if (host?.openExternally(request.url) != true) snack("No app can open this link")
+    }
+
+    fun dismissExternalLaunch() {
+        externalLaunch = null
+    }
+
     fun dismissLinkContext() {
         linkContext = null
     }
@@ -1077,22 +1154,29 @@ class BrowserViewModel @JvmOverloads constructor(
     private fun openWindow(resultMsg: Message, isUserGesture: Boolean): Boolean {
         val transport = resultMsg.obj as? WebView.WebViewTransport ?: return false
 
-        if (!isUserGesture && settings.value.blockPopups) {
+        // A gesture flag is not evidence of a distinct gesture: one tap can be replayed into a
+        // dozen window.open calls that all report one. Only the first thing to claim the touch
+        // gets a window.
+        val permitted = isUserGesture && navigationPolicy.allowWindow(null, settings.value.blockAds)
+        if (!permitted && settings.value.blockPopups) {
             activeTab?.let { it.blockedCount++ }
             popupGuard.refuse(resultMsg) { blockedUrl ->
                 snack("Pop-up blocked: ${UrlUtils.displayHost(blockedUrl)}", "Show") {
-                    openInNewTab(blockedUrl)
+                    openInNewTabAndSwitch(blockedUrl)
                 }
             }
             return true
         }
 
+        // Even a window the user did ask for opens behind the page they are on. A tap on a
+        // play button that also opens a tab should not take them away from the video.
         val newTab = Tab(desktopMode = settings.value.desktopModeByDefault)
         val webView = buildWebView(newTab)
         newTab.webView = webView
         transport.webView = webView
         resultMsg.sendToTarget()
-        tabManager.adoptTab(newTab, select = isUserGesture)
+        tabManager.adoptTab(newTab)
+        snack("Opened in background", "Switch") { switchTo(newTab.id) }
         return true
     }
 
@@ -1162,3 +1246,6 @@ class BrowserViewModel @JvmOverloads constructor(
 
 /** An in-flight horizontal navigation drag. */
 data class NavGesture(val direction: NavigationDirection, val progress: Float)
+
+/** A page asking to hand the user to another app, pending their decision. */
+data class ExternalLaunch(val url: String, val label: String)

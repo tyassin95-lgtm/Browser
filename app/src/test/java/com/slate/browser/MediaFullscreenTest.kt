@@ -27,6 +27,7 @@ import com.slate.browser.web.BrowserHost
 import com.slate.browser.web.MediaAgent
 import com.slate.browser.web.MediaFit
 import com.slate.browser.web.MediaState
+import com.slate.browser.web.ScrubPreviewMode
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -64,7 +65,14 @@ class MediaFullscreenTest {
     @Before
     fun setUp() {
         val app = ApplicationProvider.getApplicationContext<Application>()
-        db = Room.inMemoryDatabaseBuilder(app, AppDatabase::class.java).allowMainThreadQueries().build()
+        db = Room.inMemoryDatabaseBuilder(app, AppDatabase::class.java)
+            // Same-thread executors: Room's own flow teardown then completes inline during
+            // cancellation, instead of landing on a background thread after the database has
+            // been closed and surfacing in whichever test happens to run next.
+            .setQueryExecutor { it.run() }
+            .setTransactionExecutor { it.run() }
+            .allowMainThreadQueries()
+            .build()
         File(app.filesDir, "session.json").delete()
         val factory = viewModelFactory {
             initializer { BrowserViewModel(app, repository = BrowserRepository(db)) }
@@ -442,7 +450,7 @@ class MediaFullscreenTest {
     // ---- Scrub preview -------------------------------------------------------
 
     @Test
-    fun `a page that cannot produce preview frames is not asked again`() {
+    fun `a source that cannot be sampled falls back to moving the video itself`() {
         render()
         playing(
             MediaState(
@@ -452,16 +460,14 @@ class MediaFullscreenTest {
         )
         viewModel.enterMediaFullscreen()
         compose.waitForIdle()
-        assertTrue(viewModel.scrubPreviewAvailable)
 
-        // Cross-origin video taints the canvas, which is the common case; the page says so once.
-        viewModel.onScrubPreview(null)
-        compose.waitForIdle()
-        assertFalse(viewModel.scrubPreviewAvailable)
-        assertEquals(null, viewModel.scrubPreview)
-
-        // Scrubbing still works, it just shows the timestamp instead of a frame.
+        // A cross-origin stream cannot be read back, so the playing video is scrubbed instead
+        // and is itself the preview. Scrubbing keeps working either way.
         viewModel.beginScrub()
+        viewModel.onScrubPreviewMode(ScrubPreviewMode.IN_PLACE)
+        compose.waitForIdle()
+        assertEquals(ScrubPreviewMode.IN_PLACE, viewModel.scrubPreviewMode)
+
         viewModel.scrubTo(30_000)
         viewModel.endScrub()
         compose.waitForIdle()
@@ -469,17 +475,21 @@ class MediaFullscreenTest {
     }
 
     @Test
-    fun `preview availability is reconsidered for the next video`() {
+    fun `preview capability is decided again for the next video`() {
         render()
         playing(MediaState(hasVideo = true, isPlaying = true, width = 1920, height = 1080, durationMs = 60_000))
         viewModel.enterMediaFullscreen()
-        viewModel.onScrubPreview(null)
+        viewModel.onScrubPreviewMode(ScrubPreviewMode.FRAMES)
         compose.waitForIdle()
-        assertFalse(viewModel.scrubPreviewAvailable)
+        assertEquals(ScrubPreviewMode.FRAMES, viewModel.scrubPreviewMode)
 
         viewModel.exitMediaFullscreen()
         compose.waitForIdle()
-        assertTrue("a different video may well be able to", viewModel.scrubPreviewAvailable)
+        assertEquals(
+            "a different source may allow more, or less",
+            ScrubPreviewMode.NONE,
+            viewModel.scrubPreviewMode,
+        )
     }
 
     private object SilentHost : BrowserHost {

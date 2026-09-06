@@ -59,7 +59,14 @@ class ScrollRenderingTest {
     @Before
     fun setUp() {
         val app = ApplicationProvider.getApplicationContext<Application>()
-        db = Room.inMemoryDatabaseBuilder(app, AppDatabase::class.java).allowMainThreadQueries().build()
+        db = Room.inMemoryDatabaseBuilder(app, AppDatabase::class.java)
+            // Same-thread executors: Room's own flow teardown then completes inline during
+            // cancellation, instead of landing on a background thread after the database has
+            // been closed and surfacing in whichever test happens to run next.
+            .setQueryExecutor { it.run() }
+            .setTransactionExecutor { it.run() }
+            .allowMainThreadQueries()
+            .build()
         File(app.filesDir, "session.json").delete()
         val factory = viewModelFactory {
             initializer { BrowserViewModel(app, repository = BrowserRepository(db)) }
@@ -258,6 +265,99 @@ class ScrollRenderingTest {
         viewModel.load("https://example.com")
         settle()
         assertTrue(viewModel.chromeVisible)
+    }
+
+    // ---- The chrome can never be lost -----------------------------------------
+
+    @Test
+    @Config(qualifiers = "w411dp-h891dp-xxhdpi")
+    fun `a new tab always arrives showing its chrome`() {
+        render()
+        var y = 0
+        repeat(10) { y += dp(40f); feed(dp(40f), y) }
+        settle()
+        assertFalse("scrolled away on this tab", viewModel.chromeVisible)
+
+        // The new tab may well be a page with nothing to scroll, so inheriting a hidden
+        // toolbar would leave no way at all to get it back.
+        viewModel.newTab("https://other.test")
+        settle()
+        assertTrue(viewModel.chromeVisible)
+    }
+
+    @Test
+    @Config(qualifiers = "w411dp-h891dp-xxhdpi")
+    fun `switching tabs restores the chrome`() {
+        render()
+        val first = viewModel.activeTab!!
+        viewModel.openInBackgroundTab("https://second.test")
+        settle()
+
+        var y = 0
+        repeat(10) { y += dp(40f); feed(dp(40f), y) }
+        settle()
+        assertFalse(viewModel.chromeVisible)
+
+        val second = viewModel.tabManager.tabs.last()
+        viewModel.selectTab(second.id)
+        settle()
+        assertTrue("arriving at a tab shows its controls", viewModel.chromeVisible)
+
+        viewModel.selectTab(first.id)
+        settle()
+        assertTrue("and going back does too", viewModel.chromeVisible)
+    }
+
+    @Test
+    @Config(qualifiers = "w411dp-h891dp-xxhdpi")
+    fun `hiding the chrome on one tab does not hide it on another`() {
+        render()
+        val first = viewModel.activeTab!!
+        viewModel.openInBackgroundTab("https://second.test")
+        val second = viewModel.tabManager.tabs.last()
+        settle()
+
+        var y = 0
+        repeat(10) { y += dp(40f); feed(dp(40f), y) }
+        settle()
+        assertFalse(first.chromeVisible)
+        assertTrue("the other tab was never scrolled", second.chromeVisible)
+    }
+
+    @Test
+    @Config(qualifiers = "w411dp-h891dp-xxhdpi")
+    fun `navigating brings the chrome back`() {
+        render()
+        var y = 0
+        repeat(10) { y += dp(40f); feed(dp(40f), y) }
+        settle()
+        assertFalse(viewModel.chromeVisible)
+
+        viewModel.load("https://elsewhere.test")
+        settle()
+        assertTrue(viewModel.chromeVisible)
+    }
+
+    @Test
+    @Config(qualifiers = "w411dp-h891dp-xxhdpi")
+    fun `the omnibox and fullscreen both leave the chrome showing`() {
+        render()
+        var y = 0
+        repeat(10) { y += dp(40f); feed(dp(40f), y) }
+        settle()
+        assertFalse(viewModel.chromeVisible)
+
+        viewModel.focusOmnibox("")
+        settle()
+        assertTrue(viewModel.chromeVisible)
+        viewModel.blurOmnibox()
+
+        viewModel.enterImmersive()
+        settle()
+        assertFalse("fullscreen hides it deliberately", viewModel.chromeVisible)
+        viewModel.exitImmersive()
+        settle()
+        assertTrue("and leaving fullscreen gives it back", viewModel.chromeVisible)
     }
 
     private object SilentHost : BrowserHost {

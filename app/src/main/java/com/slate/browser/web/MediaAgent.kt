@@ -60,6 +60,27 @@ data class MediaState(
 /** A frame from the position a finger is hovering over while scrubbing. */
 data class ScrubPreview(val frame: android.graphics.Bitmap, val positionMs: Long)
 
+/** How much of a preview the current source can support; see the agent for how it is chosen. */
+enum class ScrubPreviewMode {
+    /** Real thumbnails, drawn from a second element without touching playback. */
+    FRAMES,
+
+    /** No thumbnails, so the playing video is seeked instead and is itself the preview. */
+    IN_PLACE,
+
+    /** Nothing to preview against. */
+    NONE,
+    ;
+
+    companion object {
+        fun from(raw: String): ScrubPreviewMode = when (raw) {
+            "frames" -> FRAMES
+            "inplace" -> IN_PLACE
+            else -> NONE
+        }
+    }
+}
+
 /** How the video is fitted to the screen when it does not match the display's shape. */
 enum class MediaFit(val cssValue: String) {
     /** The whole frame, letterboxed. Never crops, never stretches. */
@@ -132,6 +153,13 @@ class MediaAgent(context: Context) {
     fun seekTo(webView: WebView, positionMs: Long) =
         command(webView, "seek", (positionMs / 1000.0).toString())
 
+    /**
+     * Seeks relative to where the media actually is. Resolved in the page rather than here,
+     * because the position held on this side is only as fresh as the last report.
+     */
+    fun seekBy(webView: WebView, deltaMs: Long) =
+        command(webView, "seekBy", (deltaMs / 1000.0).toString())
+
     fun setVolume(webView: WebView, volume: Float) =
         command(webView, "volume", volume.coerceIn(0f, 1f).toString())
 
@@ -159,7 +187,15 @@ class MediaAgent(context: Context) {
         private val onEnterResult: (Boolean) -> Unit,
         private val onNavigationHint: (Boolean) -> Unit = {},
         private val onPreview: (ScrubPreview?) -> Unit = {},
+        private val onPreviewMode: (ScrubPreviewMode) -> Unit = {},
     ) {
+        /** What the page can offer for this source, decided once when scrubbing begins. */
+        @JavascriptInterface
+        fun previewMode(mode: String) {
+            val resolved = ScrubPreviewMode.from(mode)
+            main.post { onPreviewMode(resolved) }
+        }
+
         /**
          * The page's verdict on whether the finger that just went down belongs to it. Arrives on
          * touch down, well before a drag can travel far enough to count as a swipe.

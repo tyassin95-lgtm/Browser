@@ -39,8 +39,11 @@ import com.slate.browser.web.LinkContext
 /** Everything the browser can do with what was pressed. */
 data class LinkContextActions(
     val onOpen: () -> Unit,
-    val onOpenNewTab: () -> Unit,
-    val onOpenBackgroundTab: () -> Unit,
+    /** Creates the tab and leaves the user where they are, which is what the words mean. */
+    val onOpenInNewTab: () -> Unit,
+
+    /** Creates the tab and goes there, for when that is explicitly what was asked. */
+    val onOpenInNewTabAndSwitch: () -> Unit,
     val onCopyLink: () -> Unit,
     val onShareLink: () -> Unit,
     val onOpenImage: () -> Unit,
@@ -97,9 +100,9 @@ fun LinkContextSheet(
 
             if (context.hasLink) {
                 SheetRow(Icons.AutoMirrored.Rounded.OpenInNew, "Open") { onDismiss(); actions.onOpen() }
-                SheetRow(Icons.Rounded.Add, "Open in new tab") { onDismiss(); actions.onOpenNewTab() }
-                SheetRow(Icons.Rounded.Add, "Open in background tab") {
-                    onDismiss(); actions.onOpenBackgroundTab()
+                SheetRow(Icons.Rounded.Add, "Open in new tab") { onDismiss(); actions.onOpenInNewTab() }
+                SheetRow(Icons.AutoMirrored.Rounded.OpenInNew, "Open and switch") {
+                    onDismiss(); actions.onOpenInNewTabAndSwitch()
                 }
                 SheetRow(Icons.Rounded.ContentCopy, "Copy link") { onDismiss(); actions.onCopyLink() }
                 SheetRow(Icons.Rounded.Share, "Share link") { onDismiss(); actions.onShareLink() }

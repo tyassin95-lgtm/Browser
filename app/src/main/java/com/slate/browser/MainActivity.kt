@@ -126,7 +126,7 @@ class MainActivity : ComponentActivity(), BrowserHost {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        intent.dataString?.takeIf { it.isNotBlank() }?.let { viewModel.openInNewTab(it) }
+        intent.dataString?.takeIf { it.isNotBlank() }?.let { viewModel.openInNewTabAndSwitch(it) }
     }
 
     override fun onPause() {
@@ -210,9 +210,17 @@ class MainActivity : ComponentActivity(), BrowserHost {
             }
         }.getOrNull() ?: return false
 
+        // A web address is this browser's job. Dispatching one would hand the user to whatever
+        // else claims http, which is how a page moves them into another browser.
+        val scheme = intent.data?.scheme?.lowercase()
+        if (scheme == "http" || scheme == "https") return false
+
+        // A parsed intent can name its own component or carry a selector; both are ways to
+        // aim at a specific app rather than let the system resolve it.
         intent.addCategory(Intent.CATEGORY_BROWSABLE)
         intent.component = null
         intent.selector = null
+        intent.flags = 0
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         return try {
             startActivity(intent)

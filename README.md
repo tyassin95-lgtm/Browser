@@ -5,7 +5,7 @@ for, and the smallest amount of chrome needed to get to the next one.
 
 ## Installing
 
-`dist/slate-browser-1.5.apk` is a signed release build. Copy it to the phone and open it;
+`dist/slate-browser-1.6.apk` is a signed release build. Copy it to the phone and open it;
 Android will ask you to allow installs from your file manager the first time. Minimum Android
 8.0 (API 26).
 
@@ -28,17 +28,31 @@ it and `keystore.properties` before publishing anywhere.
 camera/microphone/location prompts, page dialogs, and certificate warnings that name the host
 and make proceeding an explicit choice.
 
+**Tabs.** Creating a tab and selecting one are separate operations in the tab model, not a flag
+a caller has to remember: `createTab` never changes what is on screen, and `select` is the only
+thing that does. "Open in new tab" therefore means what it says, and a window a page opens for
+itself lands behind the page you are reading rather than in front of it.
+
 **Ad and pop-up blocking.** Requests to advertising and tracking domains are refused before
 they leave the device, which is the difference between saving the data, the battery and the
 tracking and merely tidying the page. Matching is by registrable domain against a curated
 rule set, so a lookup walks a handful of labels of the host — no scanning, no regular
 expressions — on the network threads where every subresource passes. Cosmetic rules are a
 second pass for the gap a blocked request leaves, anchored only to markup that ad tooling
-produces. A window the page opens on its own is refused outright rather than parked in the
-background, since a pop-under nobody sees is one nobody can close; the browser finds out where
-it was headed and offers it by name, so a payment or sign-in window is one tap away. Navigations
-to blocked destinations that no one asked for are stopped too, while anything actually tapped is
-left alone.
+produces. Windows and navigations go through a single policy, in layers, because each catches a
+different abuse. WebView reports whether a navigation carried a gesture but not *which* gesture,
+so one tap can be replayed into a dozen `window.open` calls that all claim to be user
+initiated — which is how tapping play becomes five advertising tabs. Identity is reconstructed
+from the touch stream instead: a real touch starts an activation and the first thing to ask for
+it consumes it, so one tap opens at most one window and launches at most one app. A window the
+page opened without one is refused, and the browser finds out where it was headed and offers it
+by name so a payment or sign-in window stays one tap away.
+
+Leaving the browser always asks first, and an `intent:` URL carrying an ordinary web address is
+kept here rather than dispatched — handing a web address to another app is precisely how a page
+moves you into a different browser. A page moving you off-site with no touch behind it is
+stopped with an Allow, while server redirects, same-site navigation and anything you actually
+tapped pass untouched.
 
 **Long press.** Links and images get a sheet of what applies to them and nothing else — open in
 a new or background tab, copy, share, save the image. Text, form fields and anything selectable
@@ -75,6 +89,12 @@ sixty times a second. System insets are split between the two so that together t
 edge and neither sits under one, recomputed from whatever the device reports rather than from
 assumptions about where the bars are. The case that motivates it is a navigation bar that moves
 to the side in landscape, which otherwise puts the menu button underneath it.
+
+Chrome visibility belongs to the tab, never to the browser, so a tab that scrolled its toolbar
+away cannot hand that state to one you have just opened or switched to — which on a page with
+nothing to scroll would leave no way to get it back. Navigating, switching, creating a tab,
+focusing the omnibox and leaving fullscreen all restore it; scrolling a page that scrolls is the
+only thing that can take it away.
 
 Because moving the toolbar resizes the page, the decision to move it is deliberately reluctant
 and is never acted on while the page is moving. Travel is accumulated in one direction and
@@ -120,11 +140,17 @@ so canvas-rendered players show a picture too. A watchdog re-asserts all of it a
 that rewrite their own layout.
 
 **Media controls.** Play and pause, a scrub bar with position and duration, and volume. Double
-tap either side to jump ten seconds, accumulating while you keep tapping. Dragging the scrub bar
-shows the frame you are about to land on: a second detached video element is seeked and drawn
-into a small canvas, which works when the source is a plain URL the server lets us read back,
-and falls back to a timestamp when it is a Media Source stream or a cross-origin file that
-taints the canvas — both common, so the failure is reported once rather than retried per frame.
+tap either side to jump ten seconds, accumulating while you keep tapping; the offset is applied
+in the page against the element's own position, because the copy held on the browser side is
+only ever as fresh as the last report.
+
+Dragging the scrub bar previews where you will land, at whichever of three levels the source
+allows. A second detached element given the same URL with CORS requested produces real
+thumbnails without disturbing playback; if the server does not allow it — or the stream was
+assembled by Media Source and has a source no second element can open — the playing video is
+seeked instead, so the fullscreen picture is itself the preview, rate limited so the decoder is
+not thrashed. Neither is possible at a live edge with no buffer, and then there is nothing to
+scrub anyway.
 A live stream is treated as live: no scrub bar where there is nothing to scrub, no double-tap
 seeking either, a DVR bar where the stream keeps a rewind buffer, and a badge that turns into
 one-tap "go live" once you are behind the edge. Controls fade out on their own and come back on
@@ -170,8 +196,8 @@ and it only accepts a call while the browser is genuinely waiting for one the us
 ## Tests
 
 ```
-./gradlew testDebugUnitTest    # 138 tests, Android framework via Robolectric
-cd tools && npm install && npm test   # 35 tests, the injected agent against a real DOM
+./gradlew testDebugUnitTest    # 163 tests, Android framework via Robolectric
+cd tools && npm install && npm test   # 42 tests, the injected agent against a real DOM
 ```
 
 The Android tests include `BrowserUiTest` and `MediaFullscreenTest`, which compose the actual

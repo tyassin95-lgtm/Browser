@@ -55,19 +55,23 @@ class TabManager(
         boundContext = context
     }
 
-    fun openTab(url: String? = null, desktopMode: Boolean = false, select: Boolean = true): Tab {
+    /**
+     * Creates a tab. It is never selected as a side effect: which tab the user is looking at is
+     * changed only by [select], and by nothing else in this class. Keeping the two apart is what
+     * makes "open in a background tab" reliable rather than a flag some call sites remember to
+     * pass.
+     */
+    fun createTab(url: String? = null, desktopMode: Boolean = false): Tab {
         val tab = Tab(initialUrl = url.orEmpty(), desktopMode = desktopMode)
         if (url != null) tab.pendingUrl = url
         tabs.add(tab)
-        if (select) select(tab.id)
         onTabsChanged()
         return tab
     }
 
     /** Used for popups: the tab is created around a WebView the page already owns. */
-    fun adoptTab(tab: Tab, select: Boolean) {
+    fun adoptTab(tab: Tab) {
         tabs.add(tab)
-        if (select) select(tab.id)
         onTabsChanged()
     }
 
@@ -114,7 +118,7 @@ class TabManager(
 
     fun undoClose(): Tab? {
         val restored = recentlyClosed.removeLastOrNull() ?: return null
-        return openTab(restored.url, restored.desktopMode)
+        return createTab(restored.url, restored.desktopMode).also { select(it.id) }
     }
 
     /**

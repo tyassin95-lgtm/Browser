@@ -39,14 +39,16 @@ function createPage(html, options = {}) {
   const reports = [];
   const entered = [];
   const previews = [];
+  const modes = [];
   win.SlateMedia = {
     report: (json) => reports.push(JSON.parse(json)),
     entered: (ok) => entered.push(ok),
     preview: (data, t) => previews.push({ data, t }),
+    previewMode: (mode) => modes.push(mode),
   };
 
   win.eval(AGENT);
-  return { dom, win, doc: win.document, reports, entered, previews };
+  return { dom, win, doc: win.document, reports, entered, previews, modes };
 }
 
 /** Gives a <video> the geometry and playback state jsdom will not produce on its own. */
