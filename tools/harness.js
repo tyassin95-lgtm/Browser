@@ -38,9 +38,14 @@ function createPage(html, options = {}) {
 
   const reports = [];
   const entered = [];
+  // The bridge as the browser installs it: a web message listener with one method, not an
+  // object of callable natives. The agent posts JSON; nothing else is reachable.
   win.SlateMedia = {
-    report: (json) => reports.push(JSON.parse(json)),
-    entered: (ok) => entered.push(ok),
+    postMessage: (raw) => {
+      const message = JSON.parse(raw);
+      if (message.type === 'report') reports.push(message.state);
+      if (message.type === 'entered') entered.push(!!message.ok);
+    },
   };
 
   win.eval(AGENT);

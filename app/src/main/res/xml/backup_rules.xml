@@ -1,10 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Only what is worth carrying to a new device: favourites, history and preferences. Caches,
-  cookies and the open-tab session are deliberately left behind.
+  Preferences only. Naming anything here excludes everything else, which is the point: the
+  database is not listed, so it does not leave the device.
+
+  Browsing history is a record of everywhere a person has been, and a backup is a copy of it
+  outside the device sandbox that the browser no longer controls — restored onto whatever
+  device signs in next, readable by whatever has access to the account. Favourites live in the
+  same database, so the database as a whole stays put: losing a bookmark list is a smaller harm
+  than exporting a browsing history, and it is the user's own copy either way.
+
+  Cookies, caches and the open-tab session were never included.
 -->
 <full-backup-content>
-    <include domain="database" path="slate.db" />
-    <include domain="sharedpref" path="." />
     <include domain="file" path="datastore" />
 </full-backup-content>

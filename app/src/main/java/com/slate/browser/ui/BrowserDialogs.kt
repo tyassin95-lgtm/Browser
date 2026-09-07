@@ -1,6 +1,10 @@
 package com.slate.browser.ui
 
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
@@ -86,6 +90,43 @@ fun BrowserDialogs(viewModel: BrowserViewModel) {
             },
             dismissButton = {
                 TextButton(onClick = { request.onDecision(false); dismiss() }) { Text("Block") }
+            },
+        )
+    }
+
+    viewModel.pendingDownload?.let { request ->
+        AlertDialog(
+            onDismissRequest = viewModel::dismissDownload,
+            title = { Text(if (request.disguised) "This file isn't what it looks like" else "Download this file?") },
+            text = {
+                Column {
+                    Text(
+                        if (request.disguised) {
+                            "It is named to look like a document, but it will install or run " +
+                                "code on your phone if you open it."
+                        } else {
+                            "Files like this run code on your phone when you open them. Only " +
+                                "keep it if you trust where it came from."
+                        },
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    // The real name and the real source, which is what the page cannot fake.
+                    Text(request.fileName, style = MaterialTheme.typography.bodyMedium)
+                    if (request.host.isNotBlank()) {
+                        Text(
+                            "from ${request.host}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            },
+            // Keeping the file is the second-listed, plainer action; discarding is the default.
+            confirmButton = {
+                TextButton(onClick = viewModel::dismissDownload) { Text("Cancel") }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::confirmDownload) { Text("Download anyway") }
             },
         )
     }

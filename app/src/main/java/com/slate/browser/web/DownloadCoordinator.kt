@@ -9,10 +9,11 @@ import android.net.Uri
 import android.os.Environment
 import android.util.Base64
 import android.webkit.CookieManager
-import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import androidx.core.content.getSystemService
+import org.json.JSONObject
 import java.io.File
+import java.security.SecureRandom
 
 /**
  * Downloads are handed to the platform DownloadManager so they survive the browser being
@@ -26,8 +27,9 @@ class DownloadCoordinator(
     private val host: BrowserHost,
 ) {
 
-    /** True only between asking a page for a blob and receiving it back over the bridge. */
-    private var awaitingBlob = false
+    /** The blob download in flight, if any. Cleared by the first reply, right or wrong. */
+    @Volatile
+    private var pending: PendingBlob? = null
 
     fun enqueue(url: String, userAgent: String?, contentDisposition: String?, mimeType: String?) {
         if (url.startsWith("data:")) saveDataUrl(url, mimeType)
@@ -75,58 +77,120 @@ class DownloadCoordinator(
     }
 
     /**
-     * Injected into the page to pull a blob back across the JS bridge. Kept deliberately small:
-     * the bridge is the only script this browser ever adds to a page.
+     * Pulls a `blob:` URL back out of the page so it can be written to disk.
+     *
+     * A blob only exists inside the document that made it, so there is nothing the
+     * DownloadManager could fetch — the page has to hand the bytes back. That makes this the
+     * one path where web content supplies a file the browser then writes, so it is fenced on
+     * every side: the script runs in the main frame only, it carries a single-use token the
+     * browser generated for this one download, the reply must come from the origin that asked
+     * and from the main frame, and the payload is capped.
      */
     fun startBlobDownload(webView: WebView, url: String, mimeType: String?) {
-        awaitingBlob = true
+        val token = newToken()
+        pending = PendingBlob(token = token, origin = originOf(webView.url), mimeType = mimeType)
         val script = """
             (function() {
-              var xhr = new XMLHttpRequest();
-              xhr.open('GET', '${url.replace("'", "\\'")}', true);
-              xhr.responseType = 'blob';
-              xhr.onload = function() {
-                if (xhr.status !== 200) { SlateDownload.failed(); return; }
-                var reader = new FileReader();
-                reader.onloadend = function() {
-                  SlateDownload.receive(reader.result, xhr.response.type || '');
+              var token = '$token';
+              function tell(message) {
+                try {
+                  message.token = token;
+                  if (window.SlateDownload && window.SlateDownload.postMessage) {
+                    window.SlateDownload.postMessage(JSON.stringify(message));
+                  }
+                } catch (e) { /* the browser will time the request out */ }
+              }
+              try {
+                var xhr = new XMLHttpRequest();
+                xhr.open('GET', ${JSONObject.quote(url)}, true);
+                xhr.responseType = 'blob';
+                xhr.onload = function() {
+                  if (xhr.status && xhr.status !== 200) { tell({ type: 'failed' }); return; }
+                  if (xhr.response.size > $MAX_BLOB_BYTES) { tell({ type: 'failed' }); return; }
+                  var reader = new FileReader();
+                  reader.onloadend = function() {
+                    tell({ type: 'blob', data: reader.result, mime: xhr.response.type || '' });
+                  };
+                  reader.onerror = function() { tell({ type: 'failed' }); };
+                  reader.readAsDataURL(xhr.response);
                 };
-                reader.onerror = function() { SlateDownload.failed(); };
-                reader.readAsDataURL(xhr.response);
-              };
-              xhr.onerror = function() { SlateDownload.failed(); };
-              xhr.send();
+                xhr.onerror = function() { tell({ type: 'failed' }); };
+                xhr.send();
+              } catch (e) { tell({ type: 'failed' }); }
             })();
         """.trimIndent()
         webView.evaluateJavascript(script, null)
     }
 
     /**
-     * The bridge is exposed to every page, so it must not be a way for a page to write files on
-     * its own initiative: a call is only honoured while the browser is genuinely waiting for a
-     * blob the user asked to download, and the permission is consumed by the first call.
+     * The reply channel for [startBlobDownload].
+     *
+     * Reachable by any page — a listener cannot be installed for one document — so being
+     * reachable has to mean nothing. A message is only acted on when a download is genuinely
+     * outstanding, the token matches the one issued for it, and it came from the origin that
+     * asked; the token is spent on first use either way, so a page cannot retry its way in.
      */
-    inner class JsBridge {
-        @JavascriptInterface
-        fun receive(dataUrl: String, mimeType: String) {
-            if (!awaitingBlob) return
-            awaitingBlob = false
-            runCatching {
-                val payload = dataUrl.substringAfter("base64,", "")
-                require(payload.isNotEmpty())
-                val bytes = Base64.decode(payload, Base64.DEFAULT)
-                writeToDownloads(DownloadNaming.resolveForBytes(mimeType.ifBlank { null }).fileName, bytes)
-            }.onSuccess { host.snack("Saved ${it.name}") }
-                .onFailure { host.snack("Couldn't save this file") }
-        }
+    fun bridge(): PageBridge = PageBridge.named(BRIDGE_NAME) { origin, payload ->
+        val outstanding = pending ?: return@named
+        val token = payload.optString("token")
+        // Compared without an early exit: how long a wrong guess takes should not tell a page
+        // how much of it was right.
+        if (!constantTimeEquals(token, outstanding.token)) return@named
+        pending = null
+        if (origin != outstanding.origin) return@named
 
-        @JavascriptInterface
-        fun failed() {
-            if (!awaitingBlob) return
-            awaitingBlob = false
-            host.snack("Couldn't save this file")
+        when (payload.optString("type")) {
+            "blob" -> {
+                val dataUrl = payload.optString("data")
+                if (dataUrl.length > MAX_DATA_URL_CHARS) {
+                    host.snack("That file is too large to save")
+                    return@named
+                }
+                val declared = payload.optString("mime").takeIf { it.isNotBlank() }
+                    ?: outstanding.mimeType
+                saveBytes(dataUrl, declared)
+            }
+
+            else -> host.snack("Couldn't save this file")
         }
     }
+
+    private fun saveBytes(dataUrl: String, mimeType: String?) {
+        runCatching {
+            val payload = dataUrl.substringAfter("base64,", "")
+            require(payload.isNotEmpty()) { "unsupported payload" }
+            val bytes = Base64.decode(payload, Base64.DEFAULT)
+            require(bytes.size <= MAX_BLOB_BYTES) { "too large" }
+            writeToDownloads(DownloadNaming.resolveForBytes(mimeType).fileName, bytes)
+        }.onSuccess { host.snack("Saved ${it.name}") }
+            .onFailure { host.snack("Couldn't save this file") }
+    }
+
+    private fun newToken(): String {
+        val bytes = ByteArray(24)
+        SecureRandom().nextBytes(bytes)
+        return Base64.encodeToString(bytes, Base64.NO_PADDING or Base64.NO_WRAP or Base64.URL_SAFE)
+    }
+
+    private fun constantTimeEquals(a: String, b: String): Boolean {
+        if (a.length != b.length) return false
+        var difference = 0
+        for (i in a.indices) difference = difference or (a[i].code xor b[i].code)
+        return difference == 0
+    }
+
+    private fun originOf(url: String?): String {
+        if (url.isNullOrBlank()) return ""
+        return runCatching {
+            val uri = Uri.parse(url)
+            val host = uri.host ?: return ""
+            val port = if (uri.port >= 0) ":${uri.port}" else ""
+            "${uri.scheme}://$host$port"
+        }.getOrDefault("")
+    }
+
+    /** One outstanding blob download, and what it will take to answer it. */
+    private data class PendingBlob(val token: String, val origin: String, val mimeType: String?)
 
     /**
      * Writes into the public Downloads collection. Scoped storage means that is MediaStore on
@@ -182,4 +246,19 @@ class DownloadCoordinator(
 
     @Suppress("FunctionName")
     private fun UriHost(url: String): String = runCatching { Uri.parse(url).host.orEmpty() }.getOrDefault("")
+
+    private companion object {
+        /** The object name the injected script posts to; must match [bridge]. */
+        const val BRIDGE_NAME = "SlateDownload"
+
+        /**
+         * The largest blob the browser will take back through the page. A blob has to be held
+         * in memory twice over — once as bytes, once base64-encoded — so an unbounded one is a
+         * way for a page to end the browser rather than a way to save a file.
+         */
+        const val MAX_BLOB_BYTES = 64 * 1024 * 1024
+
+        /** Base64 is four characters per three bytes, plus the `data:` preamble. */
+        const val MAX_DATA_URL_CHARS = MAX_BLOB_BYTES / 3 * 4 + 128
+    }
 }

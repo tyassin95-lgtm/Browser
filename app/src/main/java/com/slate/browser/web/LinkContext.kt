@@ -4,18 +4,26 @@ import android.os.Handler
 import android.os.Looper
 import android.webkit.WebView
 
+
 /** What the user pressed and held on, and therefore what can sensibly be done with it. */
 data class LinkContext(
     val linkUrl: String? = null,
     val imageUrl: String? = null,
     val title: String? = null,
 ) {
-    val hasLink: Boolean get() = !linkUrl.isNullOrBlank()
-    val hasImage: Boolean get() = !imageUrl.isNullOrBlank()
+    /*
+     * Both addresses come from the page — an `href` attribute and a hit-test result — so both
+     * are the page's word for what it is. Only the web is offered: an action sheet built from
+     * a `javascript:` or `file:` href would turn a long press into a way to run the page's
+     * script in a fresh tab, or to aim the browser at the device, with the user believing they
+     * had opened a link.
+     */
+    val hasLink: Boolean get() = linkUrl?.let { UrlSafety.isWeb(it) } == true
+    val hasImage: Boolean get() = imageUrl?.let { UrlSafety.isWeb(it) } == true
     val isActionable: Boolean get() = hasLink || hasImage
 
     /** What the sheet is about, in one line. */
-    val label: String get() = linkUrl ?: imageUrl.orEmpty()
+    val label: String get() = (if (hasLink) linkUrl else imageUrl).orEmpty()
 }
 
 /**

@@ -80,19 +80,26 @@ async function launch() {
   const context = await browser.newContext();
 
   const events = { reports: [], entered: [], hints: [] };
-  // The bridge Android injects with addJavascriptInterface, main frame only.
-  await context.exposeBinding('__slateBridge', (source, name, a) => {
-    if (name === 'report') events.reports.push(JSON.parse(a));
-    if (name === 'entered') events.entered.push(a);
-    if (name === 'navigationHint') events.hints.push(a);
+  /*
+   * The bridge as the browser installs it: a web message listener, not an injected object.
+   * The real one refuses anything that is not the main frame, so the stand-in does too — a
+   * message arriving from a subframe here would mean the agent had started talking out of one.
+   */
+  await context.exposeBinding('__slateBridge', ({ frame }, raw) => {
+    if (frame !== frame.page().mainFrame()) return;
+    let message;
+    try {
+      message = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    if (message.type === 'report') events.reports.push(message.state);
+    if (message.type === 'entered') events.entered.push(!!message.ok);
+    if (message.type === 'navigationHint') events.hints.push(!!message.suppress);
   });
   await context.addInitScript(() => {
     if (window.top === window) {
-      window.SlateMedia = {
-        report: (j) => window.__slateBridge('report', j),
-        entered: (ok) => window.__slateBridge('entered', ok),
-        navigationHint: (s) => window.__slateBridge('navigationHint', s),
-      };
+      window.SlateMedia = { postMessage: (raw) => window.__slateBridge(raw) };
     }
   });
   // Exactly what WebViewCompat.addDocumentStartJavaScript does: every frame, document start.

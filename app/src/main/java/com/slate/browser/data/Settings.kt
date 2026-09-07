@@ -38,7 +38,13 @@ data class Settings(
     val homePage: String = "",
     val javaScriptEnabled: Boolean = true,
     val desktopModeByDefault: Boolean = false,
-    val blockThirdPartyCookies: Boolean = false,
+    /**
+     * Blocked by default. A third-party cookie exists to recognise the same person across
+     * unrelated sites, which is the mechanism rather than a side effect, and every major
+     * browser has either removed it or is removing it. Sign-in flows that genuinely need one
+     * survive: this blocks the cookie, not the navigation.
+     */
+    val blockThirdPartyCookies: Boolean = true,
     val doNotTrack: Boolean = true,
     val allowAutoplay: Boolean = false,
     val blockAds: Boolean = true,
@@ -74,7 +80,7 @@ class SettingsStore(private val context: Context) {
             homePage = p[Keys.HOME_PAGE] ?: "",
             javaScriptEnabled = p[Keys.JAVASCRIPT] ?: true,
             desktopModeByDefault = p[Keys.DESKTOP_DEFAULT] ?: false,
-            blockThirdPartyCookies = p[Keys.BLOCK_3P_COOKIES] ?: false,
+            blockThirdPartyCookies = p[Keys.BLOCK_3P_COOKIES] ?: true,
             doNotTrack = p[Keys.DNT] ?: true,
             allowAutoplay = p[Keys.AUTOPLAY] ?: false,
             blockAds = p[Keys.BLOCK_ADS] ?: true,

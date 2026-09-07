@@ -56,12 +56,19 @@
         <!--
           fullUser, not a fixed orientation: the browser supports every orientation the user
           allows, including reverse portrait, while still honouring the rotation lock.
+
+          An empty task affinity, with reparenting refused, keeps this activity in a task of its
+          own: another app cannot declare a matching affinity and have the browser's window
+          appear inside its task, where a page the user is signed in to would be framed by
+          somebody else's UI.
         -->
         <activity
             android:name=".MainActivity"
             tools:ignore="DiscouragedApi"
             android:exported="true"
             android:launchMode="singleTask"
+            android:allowTaskReparenting="false"
+            android:taskAffinity=""
             android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.Slate"
 

@@ -1,10 +1,14 @@
 package com.slate.browser.web
 
 import android.annotation.SuppressLint
+import android.os.Build
+import androidx.annotation.RequiresApi
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
 import android.net.http.SslError
+import android.webkit.HttpAuthHandler
+import android.webkit.SafeBrowsingResponse
 import android.webkit.SslErrorHandler
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceError
@@ -68,7 +72,10 @@ class SlateWebViewClient(
             blockingEnabled = blockingEnabled(),
         )
         return when (decision) {
-            is NavigationDecision.Allow -> false
+            is NavigationDecision.Allow -> {
+                if (request.isForMainFrame) pendingMainFrame = url
+                false
+            }
 
             is NavigationDecision.Block -> {
                 onRequestBlocked()
@@ -115,6 +122,17 @@ class SlateWebViewClient(
     private var documentUrl: String? = null
 
     /**
+     * The main-frame navigation that has been allowed but has not committed yet.
+     *
+     * A certificate failure arrives before the document does, so at that moment neither the
+     * tab's address nor the loaded document names where the user was going. Without this, a
+     * genuine main-frame failure on a *new* host looks like a subresource and is refused with
+     * no explanation.
+     */
+    @Volatile
+    private var pendingMainFrame: String? = null
+
+    /**
      * An HTTP failure status seen on the main frame, held until the page has finished loading.
      *
      * A status is not by itself a reason to replace what the server sent. Rate limiters and
@@ -127,6 +145,7 @@ class SlateWebViewClient(
 
     override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
         documentUrl = url
+        pendingMainFrame = null
         pendingHttpStatus = null
         pageStarted(tab, url)
     }
@@ -196,12 +215,23 @@ class SlateWebViewClient(
     }
 
     /**
-     * Certificate problems are never resolved silently. The user is told which host failed and
-     * why, and proceeding is an explicit, per-navigation choice.
+     * Certificate problems are never resolved silently, and are not always the user's to
+     * resolve at all.
+     *
+     * A failure on a subresource is refused outright with nothing offered: the user cannot
+     * meaningfully consent to a script or frame they never asked for and cannot see, and a
+     * prompt naming a host they did not navigate to is a phishing surface of its own. Only the
+     * page the user actually asked for is worth a decision, and taking it is recorded so the
+     * address bar stops claiming the connection is private.
      */
     @SuppressLint("WebViewClientOnReceivedSslError") // Never auto-proceeds: the user decides.
     override fun onReceivedSslError(view: WebView, handler: SslErrorHandler, error: SslError) {
-        val hostName = runCatching { Uri.parse(error.url).host }.getOrNull() ?: "this site"
+        val failingUrl = error.url
+        if (!isMainFrameUrl(failingUrl)) {
+            handler.cancel()
+            return
+        }
+        val hostName = runCatching { Uri.parse(failingUrl).host }.getOrNull() ?: "this site"
         val reason = when (error.primaryError) {
             SslError.SSL_EXPIRED -> "its certificate has expired"
             SslError.SSL_IDMISMATCH -> "its certificate is for a different site"
@@ -210,7 +240,81 @@ class SlateWebViewClient(
             SslError.SSL_NOTYETVALID -> "its certificate is not yet valid"
             else -> "its certificate could not be verified"
         }
-        onSslPrompt("The connection to $hostName isn't private because $reason.", { handler.proceed() }, { handler.cancel() })
+        onSslPrompt(
+            "The connection to $hostName isn't private because $reason.",
+            {
+                tab.certificateOverridden = true
+                handler.proceed()
+            },
+            { handler.cancel() },
+        )
+    }
+
+    /**
+     * Whether a failing URL is the document itself rather than something inside it.
+     *
+     * The comparison is by origin, because a main-frame navigation that is still redirecting
+     * has not become the tab's address yet — but an origin that matches neither the address
+     * being loaded nor the one already loaded is a subresource whatever it claims.
+     */
+    private fun isMainFrameUrl(failingUrl: String?): Boolean {
+        val failing = originOf(failingUrl) ?: return false
+        return failing == originOf(pendingMainFrame) ||
+            failing == originOf(documentUrl) ||
+            failing == originOf(tab.url)
+    }
+
+    private fun originOf(url: String?): String? {
+        if (url.isNullOrBlank()) return null
+        return runCatching {
+            val uri = Uri.parse(url)
+            val host = uri.host ?: return null
+            "${uri.scheme}://$host:${uri.port}"
+        }.getOrNull()
+    }
+
+    /**
+     * Safe Browsing has recognised the destination. The page is not loaded — going back to
+     * safety is the only response a browser should give without asking — and the hit is
+     * reported, which is what keeps the list useful for everyone else.
+     *
+     * The callback exists from API 27; below that WebView shows its own interstitial instead,
+     * which is the same protection with different words. Enabling Safe Browsing is separate
+     * and is done for every version that supports it.
+     */
+    @RequiresApi(Build.VERSION_CODES.O_MR1)
+    override fun onSafeBrowsingHit(
+        view: WebView,
+        request: WebResourceRequest,
+        threatType: Int,
+        callback: SafeBrowsingResponse,
+    ) {
+        if (request.isForMainFrame) {
+            tab.errorMessage = when (threatType) {
+                WebViewClient.SAFE_BROWSING_THREAT_PHISHING ->
+                    "This site has been reported for trying to steal passwords or personal details."
+                WebViewClient.SAFE_BROWSING_THREAT_MALWARE ->
+                    "This site has been reported for distributing harmful software."
+                WebViewClient.SAFE_BROWSING_THREAT_UNWANTED_SOFTWARE ->
+                    "This site has been reported for distributing unwanted software."
+                else -> "This site has been reported as unsafe."
+            }
+        }
+        runCatching { callback.backToSafety(true) }
+    }
+
+    /**
+     * A site asking for HTTP authentication. Refused rather than answered: this browser has no
+     * credential store, and a dialogue asking for a password on behalf of a host the user may
+     * only have been redirected to is a phishing surface with nothing behind it.
+     */
+    override fun onReceivedHttpAuthRequest(
+        view: WebView,
+        handler: HttpAuthHandler,
+        host: String?,
+        realm: String?,
+    ) {
+        handler.cancel()
     }
 
     private fun describeStatus(status: Int): String = when (status) {

@@ -119,23 +119,39 @@ class MediaFullscreenTest {
     }
 
     @Test
-    fun `the bridge survives whatever the page sends it`() {
+    fun `the bridge survives whatever the page sends it, and refuses subframes`() {
         var received: MediaState? = null
         val bridge = MediaAgent(ApplicationProvider.getApplicationContext())
-            .Bridge(onState = { received = it }, onEnterResult = {})
+            .bridge(onState = { received = it }, onEnterResult = {}, onNavigationHint = {})
 
-        bridge.report("not json at all")
-        assertEquals("malformed input is ignored, not crashed on", null, received)
+        fun send(raw: String?, mainFrame: Boolean = true) =
+            bridge.accept("https://example.com", raw, mainFrame)
 
-        bridge.report("""{"hasVideo":true,"playing":true,"live":true,"w":1280,"h":720}""")
-        compose.waitForIdle()
+        assertFalse("malformed input is ignored, not crashed on", send("not json at all"))
+        assertFalse(send(null))
+        assertEquals(null, received)
+
+        // An advert nested in an iframe must not be able to speak for the page.
+        assertFalse(
+            "a subframe must never reach the browser",
+            send("""{"type":"report","state":{"hasVideo":true,"w":800,"h":600}}""", mainFrame = false),
+        )
+        org.robolectric.shadows.ShadowLooper.idleMainLooper()
+        assertEquals("a subframe changed the browser's state", null, received)
+
+        // Nor may any frame make it do unbounded work.
+        assertFalse(send("{\"type\":\"report\",\"pad\":\"" + "x".repeat(80_000) + "\"}"))
+
+        assertTrue(
+            send("""{"type":"report","state":{"hasVideo":true,"playing":true,"live":true,"w":1280,"h":720}}"""),
+        )
         org.robolectric.shadows.ShadowLooper.idleMainLooper()
         assertEquals(1280, received?.width)
         assertEquals(720, received?.height)
         assertTrue(received?.isLive == true)
 
         // A hostile page cannot make the browser believe in an absurd resolution.
-        bridge.report("""{"hasVideo":true,"w":999999999,"h":-5}""")
+        send("""{"type":"report","state":{"hasVideo":true,"w":999999999,"h":-5}}""")
         org.robolectric.shadows.ShadowLooper.idleMainLooper()
         assertEquals(16384, received?.width)
         assertEquals(0, received?.height)

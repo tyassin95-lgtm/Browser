@@ -55,6 +55,27 @@ class Tab(
     var chromeVisible by mutableStateOf(true)
         internal set
 
+    /**
+     * Whether the certificate for what is on screen was ever accepted over an error.
+     *
+     * A padlock that survives a warning the user clicked through is a lie the browser tells on
+     * the site's behalf, so this follows the document and is cleared by every navigation.
+     */
+    var certificateOverridden by mutableStateOf(false)
+        internal set
+
+    /**
+     * How many modal dialogs this document has been allowed, and whether it has spent them.
+     *
+     * Both belong to the document rather than to the tab or the chrome client: a page that
+     * exhausted its allowance must not be able to recover by asking again, and the next page
+     * the user visits must not inherit the last one's bad behaviour.
+     */
+    var dialogsShown by mutableIntStateOf(0)
+        internal set
+    var dialogsSuppressed by mutableStateOf(false)
+        internal set
+
     /** How many requests this page had refused, reset on every navigation. */
     var blockedCount by mutableIntStateOf(0)
         internal set

@@ -129,6 +129,7 @@ fun BrowserScreen(
                 text = viewModel.omniboxText,
                 focused = viewModel.isOmniboxFocused,
                 isBookmarked = viewModel.isCurrentBookmarked(),
+                certificateOverridden = tab?.certificateOverridden == true,
                 compact = landscape,
                 onTextChange = viewModel::onOmniboxTextChanged,
                 onSubmit = viewModel::load,

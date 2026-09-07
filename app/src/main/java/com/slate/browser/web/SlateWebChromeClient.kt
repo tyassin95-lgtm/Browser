@@ -79,13 +79,56 @@ class SlateWebChromeClient(
 
     // ---- Page-initiated dialogs --------------------------------------------
 
+    /**
+     * How many modals this document has been allowed so far.
+     *
+     * A loop of `alert()` is the oldest way to make a browser unusable, and the modern version
+     * — a page that will not let go until the visitor calls a phone number — is the same trick
+     * with different words. After a handful the page has said what it has to say, and the rest
+     * are dismissed without being drawn. Reset by every navigation, in [onPageStarted]'s tab
+     * state, so a site is never punished for what the last one did.
+     */
+    private var dialogsShown = 0
+
+    /**
+     * Text a page put in a dialog, trimmed to something a person could read.
+     *
+     * A megabyte of text in an alert is not a message; it is a way to push the buttons off the
+     * screen, which is how a dialog becomes a trap rather than a question.
+     */
+    private fun readable(message: String?): String {
+        val text = message.orEmpty()
+        return if (text.length <= MAX_DIALOG_CHARS) text else text.take(MAX_DIALOG_CHARS) + "…"
+    }
+
+    /**
+     * Whether the page may put up one more modal.
+     *
+     * A loop of `alert()` is the oldest way to make a browser unusable, and the modern version
+     * — a page that will not let go until the visitor rings a phone number — is the same trick
+     * with different words. After a handful the page has said what it has to say and the rest
+     * are dismissed without being drawn. The count lives on the tab, so it is reset by
+     * navigating and not by the page asking again.
+     */
+    private fun allowDialog(result: JsResult): Boolean {
+        if (tab.dialogsSuppressed || tab.dialogsShown >= MAX_DIALOGS_PER_PAGE) {
+            tab.dialogsSuppressed = true
+            result.cancel()
+            return false
+        }
+        tab.dialogsShown++
+        return true
+    }
+
     override fun onJsAlert(view: WebView, url: String?, message: String?, result: JsResult): Boolean {
-        onJsDialog(JsDialogRequest.Alert(message.orEmpty(), originOf(url), result))
+        if (!allowDialog(result)) return true
+        onJsDialog(JsDialogRequest.Alert(readable(message), originOf(url), result))
         return true
     }
 
     override fun onJsConfirm(view: WebView, url: String?, message: String?, result: JsResult): Boolean {
-        onJsDialog(JsDialogRequest.Confirm(message.orEmpty(), originOf(url), result))
+        if (!allowDialog(result)) return true
+        onJsDialog(JsDialogRequest.Confirm(readable(message), originOf(url), result))
         return true
     }
 
@@ -96,14 +139,18 @@ class SlateWebChromeClient(
         defaultValue: String?,
         result: JsPromptResult,
     ): Boolean {
-        onJsDialog(JsDialogRequest.Prompt(message.orEmpty(), originOf(url), defaultValue.orEmpty(), result))
+        if (!allowDialog(result)) return true
+        onJsDialog(
+            JsDialogRequest.Prompt(readable(message), originOf(url), readable(defaultValue), result),
+        )
         return true
     }
 
     override fun onJsBeforeUnload(view: WebView, url: String?, message: String?, result: JsResult): Boolean {
+        if (!allowDialog(result)) return true
         onJsDialog(
             JsDialogRequest.Confirm(
-                message?.takeIf { it.isNotBlank() } ?: "Leave this page? Changes you made may not be saved.",
+                "Leave this page? Changes you made may not be saved.",
                 originOf(url),
                 result,
             )
@@ -114,45 +161,74 @@ class SlateWebChromeClient(
     // ---- Capabilities -------------------------------------------------------
 
     /**
-     * Camera and microphone are granted in two stages: the app must hold the Android runtime
-     * permission, and the user must then allow this specific origin. Neither is assumed.
+     * Camera and microphone are granted in three stages: the origin must be one the platform
+     * considers trustworthy, the app must hold the Android runtime permission, and the user
+     * must then allow this specific origin. None of the three is assumed.
      */
     override fun onPermissionRequest(request: PermissionRequest) {
-        val wanted = request.resources.orEmpty()
-        val androidPermissions = buildList {
-            if (wanted.contains(PermissionRequest.RESOURCE_VIDEO_CAPTURE)) add(Manifest.permission.CAMERA)
-            if (wanted.contains(PermissionRequest.RESOURCE_AUDIO_CAPTURE)) add(Manifest.permission.RECORD_AUDIO)
-        }
-        val labels = buildList {
-            if (wanted.contains(PermissionRequest.RESOURCE_VIDEO_CAPTURE)) add("camera")
-            if (wanted.contains(PermissionRequest.RESOURCE_AUDIO_CAPTURE)) add("microphone")
-            if (wanted.contains(PermissionRequest.RESOURCE_PROTECTED_MEDIA_ID)) add("protected media")
-            if (wanted.contains(PermissionRequest.RESOURCE_MIDI_SYSEX)) add("MIDI devices")
-        }
-
-        // Protected media (DRM) alone needs no Android permission and no extra prompt: it is
-        // what makes commercial video play at all.
-        if (labels.size == 1 && labels.first() == "protected media") {
-            request.grant(wanted)
+        val origin = request.origin
+        // A capability handed to a page an attacker on the network can rewrite is a capability
+        // handed to the attacker. Every browser draws this line at a secure context.
+        if (!isTrustworthy(origin)) {
+            request.deny()
             return
         }
 
-        val origin = request.origin?.host ?: "This site"
+        val wanted = request.resources.orEmpty()
+        // Only what the user is actually shown is ever granted: a request naming a resource
+        // this browser has no words for is not silently approved along with the rest.
+        val understood = wanted.filter { it in KNOWN_RESOURCES }.toTypedArray()
+        if (understood.isEmpty()) {
+            request.deny()
+            return
+        }
+
+        val androidPermissions = buildList {
+            if (understood.contains(PermissionRequest.RESOURCE_VIDEO_CAPTURE)) add(Manifest.permission.CAMERA)
+            if (understood.contains(PermissionRequest.RESOURCE_AUDIO_CAPTURE)) add(Manifest.permission.RECORD_AUDIO)
+        }
+        val labels = understood.mapNotNull { resource ->
+            when (resource) {
+                PermissionRequest.RESOURCE_VIDEO_CAPTURE -> "camera"
+                PermissionRequest.RESOURCE_AUDIO_CAPTURE -> "microphone"
+                // Protected media is a per-device identifier the page keeps. It is what makes
+                // commercial video play, and it is also a durable way to recognise this phone
+                // across every site that asks — so it is asked for rather than assumed, even
+                // though nothing in Android requires a permission for it.
+                PermissionRequest.RESOURCE_PROTECTED_MEDIA_ID -> "protected media"
+                PermissionRequest.RESOURCE_MIDI_SYSEX -> "MIDI devices"
+                else -> null
+            }
+        }.distinct()
+
         onSitePermission(
-            SitePermissionRequest(origin, labels) { allowed ->
+            SitePermissionRequest(origin?.host ?: "This site", labels) { allowed ->
                 if (!allowed) {
                     request.deny()
                     return@SitePermissionRequest
                 }
                 if (androidPermissions.isEmpty()) {
-                    request.grant(wanted)
+                    request.grant(understood)
                 } else {
                     host.requestSystemPermissions(androidPermissions.toTypedArray()) { granted ->
-                        if (granted) request.grant(wanted) else request.deny()
+                        if (granted) request.grant(understood) else request.deny()
                     }
                 }
             }
         )
+    }
+
+    /**
+     * Whether an origin may be offered a device capability at all.
+     *
+     * `https` and the loopback exception, which is the same rule the web platform applies to
+     * every powerful feature. A page delivered over plain http has no integrity worth the name.
+     */
+    private fun isTrustworthy(origin: Uri?): Boolean {
+        val scheme = origin?.scheme?.lowercase() ?: return false
+        if (scheme == "https") return true
+        val host = origin.host?.lowercase()
+        return scheme == "http" && (host == "localhost" || host == "127.0.0.1" || host == "::1")
     }
 
     override fun onPermissionRequestCanceled(request: PermissionRequest) = Unit
@@ -161,6 +237,10 @@ class SlateWebChromeClient(
         origin: String,
         callback: GeolocationPermissions.Callback,
     ) {
+        if (!isTrustworthy(runCatching { Uri.parse(origin) }.getOrNull())) {
+            callback.invoke(origin, false, false)
+            return
+        }
         onSitePermission(
             SitePermissionRequest(Uri.parse(origin).host ?: origin, listOf("your location")) { allowed ->
                 if (!allowed) {
@@ -181,6 +261,20 @@ class SlateWebChromeClient(
         filePathCallback: ValueCallback<Array<Uri>?>,
         fileChooserParams: FileChooserParams,
     ): Boolean = host.openFileChooser(fileChooserParams.createIntent(), filePathCallback)
+
+    private companion object {
+        /** Enough for a page to say something; not enough to hold the browser hostage. */
+        const val MAX_DIALOGS_PER_PAGE = 4
+        const val MAX_DIALOG_CHARS = 2048
+
+        /** The capabilities this browser has words for. Anything else is refused, not granted. */
+        val KNOWN_RESOURCES = setOf(
+            PermissionRequest.RESOURCE_VIDEO_CAPTURE,
+            PermissionRequest.RESOURCE_AUDIO_CAPTURE,
+            PermissionRequest.RESOURCE_PROTECTED_MEDIA_ID,
+            PermissionRequest.RESOURCE_MIDI_SYSEX,
+        )
+    }
 
     private fun originOf(url: String?): String =
         runCatching { Uri.parse(url).host.orEmpty() }.getOrDefault("").ifBlank { "This page" }

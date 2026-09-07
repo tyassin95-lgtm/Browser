@@ -5,7 +5,7 @@ for, and the smallest amount of chrome needed to get to the next one.
 
 ## Installing
 
-`dist/vox-browser-1.9.apk` is a signed release build. Copy it to the phone and open it;
+`dist/vox-browser-2.0.apk` is a signed release build. Copy it to the phone and open it;
 Android will ask you to allow installs from your file manager the first time. Minimum Android
 8.0 (API 26).
 
@@ -79,6 +79,81 @@ kept here rather than dispatched — handing a web address to another app is pre
 moves you into a different browser. A page moving you off-site with no touch behind it is
 stopped with an Allow, while server redirects, same-site navigation and anything you actually
 tapped pass untouched.
+
+## Security and privacy
+
+Everything a page supplies is attacker-controlled: its URL, its markup, its scripts, its
+headers, the name of the file it offers, the address it asks to be handed to another app. The
+browser is built to that assumption rather than to the assumption that most sites are honest.
+
+**Nothing native is exposed to web content.** There is no `addJavascriptInterface` anywhere in
+the codebase, and no ProGuard rule keeping one alive. An injected object appears in *every*
+frame of a WebView — an advert nested three frames deep inside an unrelated site can call the
+same native methods as the page the user is on, and the receiving code cannot tell them apart.
+Both bridges are `WebViewCompat.addWebMessageListener` instead, which reports the sender's
+origin and whether it is the main frame; anything else is dropped unread, as are messages that
+are not bounded, well-formed JSON. Pulling a `blob:` download back through the page — the one
+path where content supplies bytes the browser then writes — additionally carries a single-use
+token generated for that one download, must come from the origin that asked for it, and is
+capped in size.
+
+**Only the web is an address.** `javascript:` typed or pasted into the address bar runs against
+the page already open, which is how someone is talked into attacking their own signed-in
+session; `data:` renders attacker-authored markup under an address bar with nothing useful to
+show. Those, and `file:`, `content:`, `blob:` and the rest, are never navigated to, never
+accepted from another app's intent, and never offered as long-press actions. Schemes are read
+the way an engine reads them, with tabs and newlines stripped first, so `java\nscript:` is
+recognised as what it will become rather than as what it looks like.
+
+**The address bar cannot lie.** The host shown is the one that will actually be reached, so
+`https://accounts.google.com@evil.example/` reads as `evil.example`. Unicode hosts are shown as
+Unicode only when they cannot impersonate: Unicode's Highly Restrictive profile, so a single
+script or a real language's combination reads as itself and a Latin word with one Cyrillic
+letter substituted into it is shown encoded. A padlock is a claim about the connection, so a
+page reached by accepting a certificate warning shows a warning instead of a lock, and that
+state is cleared by the next navigation.
+
+**Transport security is not traded away.** Mixed content is refused outright rather than
+allowed for images, because passive mixed content is exactly what an attacker on the path
+replaces while the lock stays up. Certificate errors on subresources are refused with nothing
+offered — a user cannot meaningfully consent to a frame they never asked for, and a prompt
+naming a host they did not navigate to is a phishing surface of its own. Only the document the
+user actually asked for is worth a decision. User-installed certificate authorities are not
+trusted. HTTP authentication is refused rather than answered: there is no credential store
+behind it, and a password prompt on behalf of a host the user was merely redirected to is
+phishing with the browser's own chrome around it.
+
+**Capabilities are asked for, not assumed.** Camera, microphone, location, MIDI and protected
+media are refused outright on origins the platform does not consider trustworthy, and otherwise
+granted in stages — the origin must be allowed by the user, and the app must hold the Android
+runtime permission. Only the resources the user was actually shown are granted, so a request
+naming something the browser has no words for is refused rather than approved alongside the
+rest. Protected media is included because it is a durable per-device identifier as much as it
+is what makes commercial video play. Modal dialogs are capped per document and their text is
+trimmed, so a page cannot hold the browser with a loop of `alert()` or push the buttons off the
+screen.
+
+**Downloads are named by what they are.** A file that runs code when it is opened — an
+installable package, a script — is worth a sentence and a decision, and it is named by its real
+extension rather than by what the page called it, so `Invoice-2024.pdf.apk` is described as
+what it will do. Ordinary files are not interrupted: a browser that asks about every photo
+teaches people to say yes without reading.
+
+**Browsing data stays on the device.** The database is not in the backup set, cloud or
+device-transfer: a browsing history is a record of everywhere someone has been, and a backup is
+a copy of it the browser no longer controls. Preferences are all that leave. Third-party
+cookies are blocked by default, `X-Requested-With`-style identification aside (see
+`WebViewConfigurator` for why that one is not yet done), and Do Not Track and Global Privacy
+Control are sent because a browser that omits them is speaking for the user by silence.
+
+**Failing safely.** Web content cannot reach `file:` or `content:` URLs, cannot open a window
+without a gesture at three independent layers, cannot escape the downloads folder through a
+`Content-Disposition` header, and cannot make the browser do unbounded work through a bridge
+message or a blob. A dead renderer rebuilds the tab rather than taking the app down. An intent
+handed out to another app has its component, selector, extras and flags stripped and must
+declare `BROWSABLE`, so a page cannot aim the device at a chosen app or smuggle a second intent
+through an unwitting one. The activity keeps its own task affinity so another app cannot have
+the browser's window appear inside its task.
 
 **Long press.** Links and images get a sheet of what applies to them and nothing else — open in
 a new or background tab, copy, share, save the image. Text, form fields and anything selectable
@@ -248,6 +323,7 @@ cd tools && node test-media-e2e.js       # fullscreen playback in real Chromium,
 cd tools && node test-popup-guard.mjs    # the in-page guard against real pop-up techniques
 cd tools && node test-error-recovery.mjs # the content probe against real challenge pages
 cd tools && node test-keyboard-viewport.mjs # focused fields staying visible in a real engine
+cd tools && node test-bridge-isolation.mjs # what a hostile iframe can reach, in a real engine
 ```
 
 The Android tests include `BrowserUiTest` and `MediaFullscreenTest`, which compose the actual

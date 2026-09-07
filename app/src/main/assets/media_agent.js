@@ -541,11 +541,24 @@
       se: info ? info.se || 0 : 0,
       fullscreen: active
     };
+    toBrowser({ type: 'report', state: state });
+  }
+
+  /*
+   * The only channel to the browser.
+   *
+   * `SlateMedia` is a web message listener rather than an injected object, so the browser is
+   * told which frame and which origin each message came from and ignores everything that is
+   * not the main document. Child frames therefore never talk to the browser at all — they
+   * route what they find up to the top document, which is the only one that speaks.
+   */
+  function toBrowser(message) {
+    if (!TOP) return;
     try {
-      if (window.SlateMedia && window.SlateMedia.report) {
-        window.SlateMedia.report(JSON.stringify(state));
+      if (window.SlateMedia && window.SlateMedia.postMessage) {
+        window.SlateMedia.postMessage(JSON.stringify(message));
       }
-    } catch (e) { /* ignore */ }
+    } catch (e) { /* a browser that did not install the bridge simply hears nothing */ }
   }
 
   /*
@@ -681,11 +694,7 @@
 
   function reportTouch(suppress) {
     if (TOP) {
-      try {
-        if (window.SlateMedia && window.SlateMedia.navigationHint) {
-          window.SlateMedia.navigationHint(!!suppress);
-        }
-      } catch (e) { /* ignore */ }
+      toBrowser({ type: 'navigationHint', suppress: !!suppress });
     } else {
       post(parent, { ns: NS, type: 'touch', suppress: !!suppress });
     }
@@ -721,9 +730,7 @@
           // player is never missed because a timer fired first.
           probe(NS + ':enter:' + (++probeSeq), null, PROBE_BUDGET_MS, function () {
             var ok = enter(arg);
-            try {
-              if (window.SlateMedia && window.SlateMedia.entered) window.SlateMedia.entered(!!ok);
-            } catch (e) { /* ignore */ }
+            toBrowser({ type: 'entered', ok: !!ok });
           });
           return true;
         }

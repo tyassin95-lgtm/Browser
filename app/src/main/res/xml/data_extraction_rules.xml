@@ -1,13 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Preferences only, for the same reason as backup_rules.xml: a browsing history must not leave
+  the device. Device-to-device transfer is treated exactly like cloud backup — the copy is
+  still one the browser stops controlling the moment it is made.
+-->
 <data-extraction-rules>
     <cloud-backup>
-        <include domain="database" path="slate.db" />
-        <include domain="sharedpref" path="." />
         <include domain="file" path="datastore" />
     </cloud-backup>
     <device-transfer>
-        <include domain="database" path="slate.db" />
-        <include domain="sharedpref" path="." />
         <include domain="file" path="datastore" />
     </device-transfer>
 </data-extraction-rules>

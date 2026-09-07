@@ -43,9 +43,11 @@ import com.slate.browser.web.FocusVisibility
 import com.slate.browser.web.InPageGuard
 import com.slate.browser.web.NavigationPolicy
 import com.slate.browser.web.PopupGuard
+import com.slate.browser.web.UrlSafety
 import com.slate.browser.web.UserActivation
 import com.slate.browser.web.DesktopMode
 import com.slate.browser.web.DownloadCoordinator
+import com.slate.browser.web.DownloadNaming
 import com.slate.browser.web.FaviconStore
 import com.slate.browser.web.MediaAgent
 import com.slate.browser.web.MediaFit
@@ -357,6 +359,9 @@ class BrowserViewModel @JvmOverloads constructor(
     fun undoCloseTab() {
         tabManager.undoClose() ?: snack("Nothing to reopen")
     }
+
+    /** The search URL for text that is not a link, using the engine the user chose. */
+    fun searchUrlFor(text: String): String = settings.value.searchEngine.urlFor(text)
 
     fun load(input: String) {
         val tab = activeTab ?: tabManager.createTab().also { tabManager.select(it.id) }
@@ -972,6 +977,10 @@ class BrowserViewModel @JvmOverloads constructor(
                 // A new document has no media, and no blocked requests, until it says so.
                 target.media = MediaState.NONE
                 target.blockedCount = 0
+                // A new document is a new certificate decision; an exception never carries over.
+                target.certificateOverridden = false
+                target.dialogsSuppressed = false
+                target.dialogsShown = 0
                 popupGuard.clear()
                 // Element-hiding rules are chosen by the site being visited, so they follow the
                 // navigation: applied to the document now loading, and installed at document
@@ -1030,14 +1039,9 @@ class BrowserViewModel @JvmOverloads constructor(
         )
 
         webView.setDownloadListener { url, userAgent, disposition, mimeType, _ ->
-            if (url.startsWith("blob:")) {
-                downloads?.startBlobDownload(webView, url, mimeType)
-                snack("Preparing download…")
-            } else {
-                downloads?.enqueue(url, userAgent, disposition, mimeType)
-            }
+            requestDownload(webView, url, userAgent, disposition, mimeType)
         }
-        downloads?.let { webView.addJavascriptInterface(it.JsBridge(), "SlateDownload") }
+        downloads?.bridge()?.install(webView)
 
         webView.navigationListener = navigationListenerFor(tab)
         webView.userActivation = userActivation
@@ -1057,19 +1061,16 @@ class BrowserViewModel @JvmOverloads constructor(
         desktopMode.apply(webView, tab, tab.isDesktopMode)
         cosmeticFilter.apply(webView, tab, settings.value.blockAds)
         inPageGuard.apply(webView, tab, settings.value.blockAds)
-        webView.addJavascriptInterface(
-            mediaAgent.Bridge(
-                onState = { state -> onMediaState(tab, state) },
-                onNavigationHint = { suppress -> onNavigationHint(tab, suppress) },
-                onEnterResult = { success ->
-                    if (!success && isMediaFullscreen) {
-                        exitMediaFullscreen()
-                        snack("Couldn't make this video fullscreen")
-                    }
-                },
-            ),
-            "SlateMedia",
-        )
+        mediaAgent.bridge(
+            onState = { state -> onMediaState(tab, state) },
+            onNavigationHint = { suppress -> onNavigationHint(tab, suppress) },
+            onEnterResult = { success ->
+                if (!success && isMediaFullscreen) {
+                    exitMediaFullscreen()
+                    snack("Couldn't make this video fullscreen")
+                }
+            },
+        ).install(webView)
 
         webView.setFindListener { activeIndex, numberOfMatches, isDoneCounting ->
             if (isDoneCounting) {
@@ -1135,6 +1136,64 @@ class BrowserViewModel @JvmOverloads constructor(
                 load(url)
             }
         }
+    }
+
+    /**
+     * A download the page has started.
+     *
+     * Nothing is fetched until the browser knows what it would be saving. A file that runs when
+     * it is opened — an installable package, a script — is worth a sentence and a decision,
+     * named by what it actually is rather than by what the page called it, because a download
+     * the user did not understand is the last step of most attacks that get this far. Ordinary
+     * files are not interrupted: a browser that asks about every photo teaches people to say
+     * yes without reading.
+     */
+    private fun requestDownload(
+        webView: WebView,
+        url: String,
+        userAgent: String?,
+        disposition: String?,
+        mimeType: String?,
+    ) {
+        val coordinator = downloads ?: return
+        val isBlob = url.startsWith("blob:")
+        if (!isBlob && !UrlSafety.isWeb(url) && !url.startsWith("data:")) {
+            snack("That download isn't from a web address")
+            return
+        }
+        val resolved = DownloadNaming.resolve(url, disposition, mimeType)
+        val start = {
+            if (isBlob) {
+                coordinator.startBlobDownload(webView, url, mimeType)
+                snack("Preparing download…")
+            } else {
+                coordinator.enqueue(url, userAgent, disposition, mimeType)
+            }
+        }
+        if (resolved.isExecutable || resolved.isDisguised) {
+            pendingDownload = RiskyDownload(
+                fileName = resolved.fileName,
+                host = UrlUtils.displayHost(webView.url.orEmpty()),
+                disguised = resolved.isDisguised,
+                onConfirm = start,
+            )
+        } else {
+            start()
+        }
+    }
+
+    /** A download waiting on the user to say whether they meant it. */
+    var pendingDownload by mutableStateOf<RiskyDownload?>(null)
+        private set
+
+    fun confirmDownload() {
+        val request = pendingDownload ?: return
+        pendingDownload = null
+        request.onConfirm()
+    }
+
+    fun dismissDownload() {
+        pendingDownload = null
     }
 
     fun confirmExternalLaunch() {
@@ -1284,3 +1343,11 @@ data class NavGesture(val direction: NavigationDirection, val progress: Float)
 
 /** A page asking to hand the user to another app, pending their decision. */
 data class ExternalLaunch(val url: String, val label: String)
+
+/** A download that runs code when opened, held until the user confirms it. */
+data class RiskyDownload(
+    val fileName: String,
+    val host: String,
+    val disguised: Boolean,
+    val onConfirm: () -> Unit,
+)

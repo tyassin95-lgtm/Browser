@@ -1,7 +1,7 @@
-# Keep the JS bridge surface reachable from web content.
--keepclassmembers class com.slate.browser.web.** {
-    @android.webkit.JavascriptInterface <methods>;
-}
+# No @JavascriptInterface keep rule: this browser exposes no injected objects to web content.
+# Everything a page can reach goes through a web message listener, which is called by name from
+# Kotlin and needs no reflective surface kept alive. If that rule ever comes back, so has the
+# attack surface it protects.
 
 # Room generated implementations are resolved reflectively by name.
 -keep class * extends androidx.room.RoomDatabase { <init>(); }

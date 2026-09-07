@@ -3,7 +3,6 @@ package com.slate.browser.web
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
-import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
@@ -136,53 +135,54 @@ class MediaAgent(context: Context) {
     }
 
     /**
-     * The page's end of the conversation. Pages are untrusted, so every field is re-derived
-     * defensively and nothing here can do more than change what the media button shows.
+     * The page's end of the conversation.
+     *
+     * Pages are untrusted, so every field is re-derived defensively and clamped, and the
+     * transport ([PageBridge]) has already established that the message came from the main
+     * frame as well-formed JSON. Even so, nothing reachable from here does more than change
+     * what the media button shows.
      */
-    inner class Bridge(
-        private val onState: (MediaState) -> Unit,
-        private val onEnterResult: (Boolean) -> Unit,
-        private val onNavigationHint: (Boolean) -> Unit = {},
-    ) {
-        /**
-         * The page's verdict on whether the finger that just went down belongs to it. Arrives on
-         * touch down, well before a drag can travel far enough to count as a swipe.
-         */
-        @JavascriptInterface
-        fun navigationHint(suppress: Boolean) {
-            main.post { onNavigationHint(suppress) }
-        }
+    fun bridge(
+        onState: (MediaState) -> Unit,
+        onEnterResult: (Boolean) -> Unit,
+        onNavigationHint: (Boolean) -> Unit,
+    ): PageBridge = PageBridge.named(BRIDGE_NAME) { _, payload ->
+        when (payload.optString("type")) {
+            // The page's verdict on whether the finger that just went down belongs to it.
+            "navigationHint" -> main.post { onNavigationHint(payload.optBoolean("suppress")) }
 
-        @JavascriptInterface
-        fun report(json: String) {
-            val state = runCatching {
-                val o = JSONObject(json)
-                MediaState(
-                    hasVideo = o.optBoolean("hasVideo"),
-                    isPlaying = o.optBoolean("playing"),
-                    isLive = o.optBoolean("live"),
-                    isMuted = o.optBoolean("muted"),
-                    width = o.optInt("w").coerceIn(0, 16384),
-                    height = o.optInt("h").coerceIn(0, 16384),
-                    volume = o.optDouble("volume", 1.0).toFloat().coerceIn(0f, 1f),
-                    positionMs = o.seconds("t"),
-                    durationMs = o.seconds("d"),
-                    seekableStartMs = o.seconds("ss"),
-                    seekableEndMs = o.seconds("se"),
-                )
-            }.getOrNull() ?: return
-            main.post { onState(state) }
-        }
+            "entered" -> main.post { onEnterResult(payload.optBoolean("ok")) }
 
-        @JavascriptInterface
-        fun entered(success: Boolean) {
-            main.post { onEnterResult(success) }
+            "report" -> {
+                val state = runCatching {
+                    val o = payload.optJSONObject("state") ?: return@runCatching null
+                    MediaState(
+                        hasVideo = o.optBoolean("hasVideo"),
+                        isPlaying = o.optBoolean("playing"),
+                        isLive = o.optBoolean("live"),
+                        isMuted = o.optBoolean("muted"),
+                        width = o.optInt("w").coerceIn(0, MAX_DIMENSION),
+                        height = o.optInt("h").coerceIn(0, MAX_DIMENSION),
+                        volume = o.optDouble("volume", 1.0).toFloat().coerceIn(0f, 1f),
+                        positionMs = o.seconds("t"),
+                        durationMs = o.seconds("d"),
+                        seekableStartMs = o.seconds("ss"),
+                        seekableEndMs = o.seconds("se"),
+                    )
+                }.getOrNull() ?: return@named
+                main.post { onState(state) }
+            }
         }
-
     }
 
     private companion object {
         const val ASSET = "media_agent.js"
+
+        /** The object name the injected agent posts to; must match the agent script. */
+        const val BRIDGE_NAME = "SlateMedia"
+
+        /** No display is this large; a page claiming otherwise is claiming it for a reason. */
+        const val MAX_DIMENSION = 16384
 
         /** Times arrive as seconds from the page, and a page can send anything at all. */
         fun JSONObject.seconds(key: String): Long {

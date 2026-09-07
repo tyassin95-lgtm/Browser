@@ -21,6 +21,7 @@ import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Star
+import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
@@ -59,6 +60,8 @@ fun Omnibox(
     text: String,
     focused: Boolean,
     isBookmarked: Boolean,
+    /** True when this page is only on screen because a certificate warning was accepted. */
+    certificateOverridden: Boolean,
     compact: Boolean,
     onTextChange: (String) -> Unit,
     onSubmit: (String) -> Unit,
@@ -82,14 +85,27 @@ fun Omnibox(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            // A padlock is a claim about the connection, so it is shown only when the claim
+            // holds. A page the user reached by accepting a certificate warning is not private
+            // and must not look it, whatever its scheme says.
+            val insecure = certificateOverridden || !UrlUtils.isSecure(url)
             Icon(
                 imageVector = when {
                     focused -> Icons.Rounded.Search
+                    certificateOverridden -> Icons.Rounded.Warning
                     UrlUtils.isSecure(url) -> Icons.Rounded.Lock
                     else -> Icons.Rounded.Public
                 },
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                contentDescription = if (certificateOverridden && !focused) {
+                    "Connection is not private"
+                } else {
+                    null
+                },
+                tint = if (insecure && !focused) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
                 modifier = Modifier.size(16.dp),
             )
             Spacer(Modifier.width(10.dp))

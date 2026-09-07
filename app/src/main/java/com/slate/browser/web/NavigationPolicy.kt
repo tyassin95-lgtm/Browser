@@ -135,8 +135,7 @@ class NavigationPolicy(
         return activation.consume()
     }
 
-    private fun schemeOf(url: String): String? =
-        runCatching { Uri.parse(url).scheme?.lowercase() }.getOrNull()
+    private fun schemeOf(url: String): String? = UrlSafety.schemeOf(url)
 
     private fun isCrossOrigin(url: String, currentPageUrl: String?): Boolean {
         if (currentPageUrl.isNullOrBlank()) return false
@@ -169,7 +168,10 @@ class NavigationPolicy(
     }
 
     private companion object {
-        /** Schemes that go to a well-understood system app rather than an arbitrary one. */
-        val SAFE_SCHEMES = setOf("tel", "mailto", "sms", "smsto", "geo")
+        /**
+         * Schemes that go to a well-understood system app rather than an arbitrary one. Shared
+         * with [UrlSafety] so the two cannot drift into disagreeing about what is safe.
+         */
+        val SAFE_SCHEMES = UrlSafety.SYSTEM_APP_SCHEMES
     }
 }

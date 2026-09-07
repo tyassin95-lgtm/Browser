@@ -2,6 +2,7 @@ package com.slate.browser
 
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.app.SearchManager
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -28,6 +29,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import com.slate.browser.ui.BrowserScreen
 import com.slate.browser.ui.theme.SlateTheme
 import com.slate.browser.web.BrowserHost
+import com.slate.browser.web.UrlSafety
 
 /**
  * The browser's only activity.
@@ -80,7 +82,7 @@ class MainActivity : ComponentActivity(), BrowserHost {
         }
 
         viewModel.attach(this, this)
-        viewModel.bootstrap(intent?.dataString?.takeIf { it.isNotBlank() })
+        viewModel.bootstrap(webAddressFrom(intent))
 
         setContent {
             val settings by viewModel.settings.collectAsState()
@@ -126,7 +128,33 @@ class MainActivity : ComponentActivity(), BrowserHost {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        intent.dataString?.takeIf { it.isNotBlank() }?.let { viewModel.openInNewTabAndSwitch(it) }
+        webAddressFrom(intent)?.let { viewModel.openInNewTabAndSwitch(it) }
+    }
+
+    /**
+     * What another app has asked this browser to open, if it is something a browser should
+     * open at all.
+     *
+     * This activity is exported, so any app on the device can start it with any URI it likes —
+     * the declared http/https filter constrains implicit intents and nothing else. An address
+     * arriving here is therefore untrusted input: only the web is accepted, so a caller cannot
+     * steer the browser at `file:` and `content:` URIs it would then be rendering on the
+     * device's behalf, or at `javascript:` running in whatever tab is open.
+     *
+     * Shared text is accepted too, because that is what the SEND filter is for, but it goes
+     * through the same door: a link if it is one, a search if it is not.
+     */
+    private fun webAddressFrom(intent: Intent?): String? {
+        if (intent == null) return null
+        intent.dataString?.takeIf { it.isNotBlank() }?.let { url ->
+            return url.takeIf { UrlSafety.isSafeExternalEntry(it) }
+        }
+        if (intent.action != Intent.ACTION_SEND && intent.action != Intent.ACTION_WEB_SEARCH) return null
+        val shared = intent.getStringExtra(Intent.EXTRA_TEXT)
+            ?: intent.getStringExtra(SearchManager.QUERY)
+        val text = shared?.trim()?.take(MAX_SHARED_TEXT).orEmpty()
+        if (text.isEmpty()) return null
+        return if (UrlSafety.isSafeExternalEntry(text)) text else viewModel.searchUrlFor(text)
     }
 
     override fun onPause() {
@@ -202,6 +230,10 @@ class MainActivity : ComponentActivity(), BrowserHost {
     }
 
     override fun openExternally(url: String): Boolean {
+        // Decided before the URL is parsed, not after: `file:` and `content:` handed to another
+        // app leak this browser's own storage, and a web address handed out is how a page moves
+        // the user into a different browser.
+        if (!UrlSafety.mayLeaveTheBrowser(url)) return false
         val intent = runCatching {
             if (url.startsWith("intent:")) {
                 Intent.parseUri(url, Intent.URI_INTENT_SCHEME)
@@ -215,13 +247,22 @@ class MainActivity : ComponentActivity(), BrowserHost {
         val scheme = intent.data?.scheme?.lowercase()
         if (scheme == "http" || scheme == "https") return false
 
-        // A parsed intent can name its own component or carry a selector; both are ways to
-        // aim at a specific app rather than let the system resolve it.
+        // The parsed intent is attacker-authored in full. A component or selector aims it at
+        // one app rather than letting the system resolve it; extras can carry another Intent
+        // for an unwitting app to launch on the page's behalf; flags can carry URI grants.
+        // Requiring BROWSABLE is what limits the result to activities that expect to be
+        // reached from the web at all.
         intent.addCategory(Intent.CATEGORY_BROWSABLE)
         intent.component = null
         intent.selector = null
+        intent.replaceExtras(null as Bundle?)
         intent.flags = 0
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+        // And the data must still be something that may leave, after the parse: an
+        // `intent:` URL carries its own payload, which the check above never saw.
+        val resolved = intent.data?.toString()
+        if (resolved != null && !UrlSafety.mayLeaveTheBrowser(resolved)) return false
         return try {
             startActivity(intent)
             true
@@ -265,3 +306,6 @@ class MainActivity : ComponentActivity(), BrowserHost {
         }
     }
 }
+
+/** A shared payload longer than this is not a link and not a query anyone typed. */
+private const val MAX_SHARED_TEXT = 2048

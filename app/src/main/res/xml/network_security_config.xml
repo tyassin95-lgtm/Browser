@@ -6,6 +6,10 @@
 
   System certificate authorities only: user-installed CAs are not trusted, which keeps casual
   interception off the table while leaving genuine enterprise MDM configuration untouched.
+
+  Certificate Transparency enforcement (<certificateTransparency>) belongs here too, but the
+  element is only understood from compileSdk 36; it is left out rather than shipped unvalidated
+  against the SDK this builds with.
 -->
 <network-security-config xmlns:tools="http://schemas.android.com/tools">
     <base-config cleartextTrafficPermitted="true" tools:ignore="InsecureBaseConfiguration">

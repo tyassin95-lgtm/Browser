@@ -20,7 +20,41 @@ import java.net.URLDecoder
  */
 object DownloadNaming {
 
-    data class Resolved(val fileName: String, val mimeType: String)
+    data class Resolved(val fileName: String, val mimeType: String) {
+        /**
+         * Whether saving this file could hand the device to whoever served it.
+         *
+         * An installable package or a script is not "a file the user downloaded" in the way a
+         * photo is: opening it runs somebody else's code. A browser cannot know intent, so it
+         * asks — and it asks using the *real* extension, which is the one thing a page
+         * dressing an APK up as an invoice cannot control.
+         */
+        val isExecutable: Boolean
+            get() = extensionOf(fileName)?.let { it in EXECUTABLE_EXTENSIONS } == true
+
+        /**
+         * Whether the name is dressed to look like something else — `invoice.pdf.apk`, whose
+         * first extension is all a truncating file list will show.
+         */
+        val isDisguised: Boolean
+            get() {
+                val extension = extensionOf(fileName) ?: return false
+                val inner = extensionOf(fileName.dropLast(extension.length + 1)) ?: return false
+                return KNOWN_TYPES.containsKey(inner) && inner != extension
+            }
+    }
+
+    /**
+     * Extensions whose whole purpose is to be executed. Deliberately a list of what runs rather
+     * than a list of what is safe: a new document format is harmless if this misses it, while a
+     * new package format that slips through is not.
+     */
+    private val EXECUTABLE_EXTENSIONS = setOf(
+        "apk", "apks", "xapk", "apkm", "aab", "dex", "jar", "so",
+        "exe", "msi", "com", "scr", "bat", "cmd", "ps1", "vbs", "vbe", "js", "jse",
+        "wsf", "wsh", "hta", "cpl", "msc", "reg", "lnk", "pif",
+        "sh", "bash", "run", "bin", "deb", "rpm", "dmg", "pkg", "app",
+    )
 
     /**
      * Content types that mean "some bytes are coming" and nothing more. Servers use these for
