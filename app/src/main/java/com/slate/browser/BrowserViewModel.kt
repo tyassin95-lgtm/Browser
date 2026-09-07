@@ -39,6 +39,7 @@ import com.slate.browser.util.UrlUtils
 import com.slate.browser.web.BrowserHost
 import com.slate.browser.web.ContentBlocker
 import com.slate.browser.web.CosmeticFilter
+import com.slate.browser.web.FocusVisibility
 import com.slate.browser.web.InPageGuard
 import com.slate.browser.web.NavigationPolicy
 import com.slate.browser.web.PopupGuard
@@ -110,6 +111,8 @@ class BrowserViewModel @JvmOverloads constructor(
     private val cosmeticFilter = CosmeticFilter(contentBlocker)
 
     private val inPageGuard = InPageGuard(app)
+
+    private val focusVisibility = FocusVisibility(app)
     private val userActivation = UserActivation()
     private val navigationPolicy = NavigationPolicy(contentBlocker, userActivation)
 
@@ -535,8 +538,30 @@ class BrowserViewModel @JvmOverloads constructor(
      * what tears — and doing it repeatedly, as an unfiltered per-frame rule does, tears
      * continuously.
      */
+    /**
+     * Whether the keyboard is up.
+     *
+     * While it is, the toolbar stays put. Opening the keyboard over a page input makes the
+     * WebView scroll the field into view, and that scroll is not the user asking for more
+     * room — letting it collapse the toolbar would take the address bar away mid-edit and
+     * resize the page a second time just as the field was being revealed.
+     */
+    var isKeyboardVisible by mutableStateOf(false)
+        private set
+
+    fun onKeyboardVisibilityChanged(visible: Boolean) {
+        if (isKeyboardVisible == visible) return
+        isKeyboardVisible = visible
+        if (visible) {
+            chromeSettleJob?.cancel()
+            chromeSettleJob = null
+            showChrome()
+        }
+    }
+
     fun onPageScrolled(delta: Int, scrollY: Int) {
         if (!settings.value.hideBarsOnScroll || isOmniboxFocused || isImmersive) return
+        if (isKeyboardVisible) return
         chromeScrollPolicy.onScroll(delta, scrollY)
 
         if (chromeScrollPolicy.desired == chromeVisible) {
@@ -1028,6 +1053,7 @@ class BrowserViewModel @JvmOverloads constructor(
         }
 
         mediaAgent.install(webView)
+        focusVisibility.install(webView)
         desktopMode.apply(webView, tab, tab.isDesktopMode)
         cosmeticFilter.apply(webView, tab, settings.value.blockAds)
         inPageGuard.apply(webView, tab, settings.value.blockAds)

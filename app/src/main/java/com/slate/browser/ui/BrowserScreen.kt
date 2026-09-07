@@ -22,7 +22,8 @@ import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.imeAnimationTarget
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -116,6 +117,10 @@ fun BrowserScreen(
     val density = LocalDensity.current
     var chromeHeight by remember { mutableStateOf(0.dp) }
 
+    // The browser holds still while the keyboard is up; see onKeyboardVisibilityChanged.
+    val keyboardVisible = keyboardInsets().getBottom(density) > 0
+    LaunchedEffect(keyboardVisible) { viewModel.onKeyboardVisibilityChanged(keyboardVisible) }
+
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
 
         val omniboxSlot: @Composable (Modifier) -> Unit = { slotModifier ->
@@ -206,8 +211,9 @@ fun BrowserScreen(
         val page: @Composable (Modifier) -> Unit = { pageModifier ->
             Box(
                 pageModifier.then(
-                    // Fullscreen browsing wants every pixel, cutout included.
-                    if (immersive) Modifier
+                    // Fullscreen browsing wants every pixel, cutout included — but a keyboard
+                    // is not something to draw under, whatever mode the browser is in.
+                    if (immersive) Modifier.windowInsetsPadding(keyboardInsets())
                     else Modifier.windowInsetsPadding(systemChromeInsets().only(pageSides)),
                 ),
             ) {
@@ -240,10 +246,9 @@ fun BrowserScreen(
                         onNext = viewModel::findNext,
                         onClose = viewModel::closeFind,
                         modifier = Modifier
-                            .imePadding()
                             .then(
-                                // The toolbar below already clears the navigation bar; without
-                                // one there, this bar has to clear it itself.
+                                // The toolbar below already clears the navigation bar and the
+                                // keyboard; without one there, this bar has to clear them itself.
                                 if (!landscape && chromeVisible) {
                                     Modifier
                                 } else {
@@ -266,7 +271,7 @@ fun BrowserScreen(
          * inset padding the toolbar took.
          */
         val bottomOccupied = when {
-            immersive -> 0.dp
+            immersive -> keyboardInsets().asPaddingValues().calculateBottomPadding()
             !landscape && chromeVisible -> chromeHeight
             else -> systemChromeInsets().asPaddingValues().calculateBottomPadding()
         }
@@ -467,10 +472,7 @@ private fun OmniboxSheet(
             .fillMaxSize()
             // The toolbar's own band is left out entirely, so nothing here is ever in front of
             // the text field, the tab button or the menu button.
-            .padding(
-                top = if (landscape) chromeHeight else 0.dp,
-                bottom = if (landscape) 0.dp else bottomOccupied,
-            ),
+            .padding(top = if (landscape) chromeHeight else 0.dp, bottom = bottomOccupied),
     ) {
         // Tapping or flicking anywhere outside the editor puts it away, the way dismissing a
         // keyboard-backed field is expected to work.
@@ -490,8 +492,7 @@ private fun OmniboxSheet(
                     .fillMaxWidth()
                     // Only the horizontal insets: the band this sheet sits in already stops
                     // short of the toolbar, which carries the inset for the edge it is on.
-                    .windowInsetsPadding(systemChromeInsets().only(WindowInsetsSides.Horizontal))
-                    .imePadding(),
+                    .windowInsetsPadding(systemChromeInsets().only(WindowInsetsSides.Horizontal)),
                 color = MaterialTheme.colorScheme.surface,
             ) {
                 Column(Modifier.verticalScroll(rememberScrollState())) {
@@ -595,6 +596,33 @@ const val CHROME_TAG = "slate:chrome"
 /** The dimming layer behind the omnibox editor; it must never reach the toolbar. */
 const val OMNIBOX_SCRIM_TAG = "slate:omnibox-scrim"
 
+/**
+ * Everything the browser's own layout has to keep clear of: the system bars, the display
+ * cutout, and the keyboard.
+ *
+ * The keyboard belongs in the same expression as the rest, because the window does not resize
+ * for it. This app draws edge to edge, which means the IME arrives as an inset and nothing
+ * moves unless the layout moves it — so leaving the keyboard out of the model put the toolbar,
+ * and with it the address bar being typed into, underneath the keyboard, and left the page its
+ * full height with the bottom of it covered.
+ *
+ * [union] takes the larger of each side rather than adding them, so the bottom is the
+ * navigation bar or the keyboard, never both counted at once, and never a fixed number.
+ *
+ * The *target* of the IME animation is used rather than its current position. The page is a
+ * WebView, and following the animation would relayout and re-raster it on every frame of the
+ * keyboard sliding in — the same cost that made scrolling tear, for an effect nobody sees
+ * behind a moving keyboard. This settles the layout once, at the size the keyboard is going to
+ * be, which is also what lets WebView scroll the focused field into view exactly once.
+ */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun systemChromeInsets(): WindowInsets =
-    WindowInsets.systemBars.union(WindowInsets.displayCutout)
+    WindowInsets.systemBars
+        .union(WindowInsets.displayCutout)
+        .union(WindowInsets.imeAnimationTarget)
+
+/** The keyboard alone, for the layers that take no other inset. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun keyboardInsets(): WindowInsets = WindowInsets.imeAnimationTarget

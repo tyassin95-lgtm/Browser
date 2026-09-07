@@ -1,0 +1,19 @@
+<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>fields</title>
+<style>
+  body{margin:0;font:16px system-ui;background:#fafafa}
+  .filler{height:1400px;background:linear-gradient(#fff,#eee);padding:12px}
+  label{display:block;margin:10px 12px 4px}
+  input,textarea{width:calc(100% - 24px);margin:0 12px;padding:12px;font-size:16px;box-sizing:border-box}
+  textarea{height:110px}
+  #fixedbar{position:fixed;left:0;right:0;bottom:0;background:#222;padding:8px 0}
+  #fixedbar input{color:#fff;background:#333;border:1px solid #555}
+  .tail{height:40px}
+</style>
+<div class="filler">A long scrolling page.</div>
+<label for="search">Search</label><input id="search" type="search" placeholder="search">
+<label for="comment">Comment</label><textarea id="comment"></textarea>
+<label for="user">Username</label><input id="user" type="text" autocomplete="username">
+<label for="pass">Password</label><input id="pass" type="password" autocomplete="current-password">
+<div class="tail"></div>
+<div id="fixedbar"><input id="fixed" type="text" placeholder="fixed footer input"></div>

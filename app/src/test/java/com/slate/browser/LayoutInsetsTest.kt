@@ -10,6 +10,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.platform.LocalView
 import androidx.core.graphics.Insets
@@ -26,6 +27,7 @@ import com.slate.browser.data.BrowserRepository
 import com.slate.browser.data.ThemeMode
 import com.slate.browser.ui.BrowserScreen
 import com.slate.browser.ui.CHROME_TAG
+import com.slate.browser.ui.OMNIBOX_SCRIM_TAG
 import com.slate.browser.ui.PAGE_TAG
 import com.slate.browser.ui.theme.SlateTheme
 import com.slate.browser.web.BrowserHost
@@ -100,17 +102,32 @@ class LayoutInsetsTest {
         compose.waitForIdle()
     }
 
-    /** Puts real system bars around the window, the way a device does. */
-    private fun applyInsets(left: Int = 0, top: Int = 0, right: Int = 0, bottom: Int = 0) {
+    /**
+     * Puts real system bars — and optionally a keyboard — around the window, the way a device
+     * does. The insets go through `dispatchApplyWindowInsets`, which is the same path the
+     * platform uses, so what is being tested is the layout's real response to them.
+     */
+    private fun applyInsets(
+        left: Int = 0,
+        top: Int = 0,
+        right: Int = 0,
+        bottom: Int = 0,
+        keyboard: Int = 0,
+    ) {
         compose.runOnUiThread {
             val root = requireNotNull(hostView)
-            val insets = WindowInsetsCompat.Builder()
+            val builder = WindowInsetsCompat.Builder()
                 .setInsets(
                     WindowInsetsCompat.Type.systemBars(),
                     Insets.of(left, top, right, bottom),
                 )
-                .build()
-            ViewCompat.dispatchApplyWindowInsets(root, insets)
+            if (keyboard > 0) {
+                // A keyboard covers the navigation bar rather than stacking on top of it,
+                // which is exactly how the platform reports it.
+                builder.setInsets(WindowInsetsCompat.Type.ime(), Insets.of(0, 0, 0, keyboard))
+                builder.setVisible(WindowInsetsCompat.Type.ime(), true)
+            }
+            ViewCompat.dispatchApplyWindowInsets(root, builder.build())
         }
         compose.waitForIdle()
     }
@@ -178,6 +195,153 @@ class LayoutInsetsTest {
             menu.right <= root.right - sideBar + 1f,
         )
         compose.onNodeWithContentDescription("Menu").assertIsDisplayed()
+    }
+
+    /*
+     * The keyboard.
+     *
+     * The window does not resize for it — this browser draws edge to edge, so the IME arrives
+     * as an inset and nothing moves unless the layout moves it. Left out of the inset model,
+     * the toolbar stayed at the bottom of the window with the keyboard on top of it, so the
+     * address bar could be typed into and not seen, and the page kept its full height with the
+     * bottom of it covered.
+     */
+
+    @Test
+    @Config(qualifiers = "w411dp-h891dp")
+    fun `in portrait the keyboard pushes the toolbar and the page above it`() {
+        render()
+        val keyboard = 320
+        applyInsets(top = 48, bottom = 60, keyboard = keyboard)
+
+        val root = compose.onRoot().fetchSemanticsNode().boundsInRoot
+        val page = pageBounds()
+        val chrome = chromeBounds()
+        val keyboardTop = root.bottom - keyboard
+
+        // The toolbar's surface reaches the window edge, as it already does behind a
+        // navigation bar; what has to clear the keyboard is what the user is looking at.
+        val omnibox = compose.onNodeWithText("Search or enter address").fetchSemanticsNode().boundsInRoot
+        assertTrue(
+            "the address bar (${omnibox.bottom}) is under the keyboard (top $keyboardTop)",
+            omnibox.bottom <= keyboardTop + 1f,
+        )
+        val menu = compose.onNodeWithContentDescription("Menu").fetchSemanticsNode().boundsInRoot
+        assertTrue("the toolbar's controls must clear the keyboard", menu.bottom <= keyboardTop + 1f)
+
+        assertTrue(
+            "the page (${page.bottom}) runs under the keyboard (top $keyboardTop)",
+            page.bottom <= keyboardTop + 1f,
+        )
+        assertTrue("the page must still end at the toolbar", chrome.top >= page.bottom - 1f)
+        assertTrue("the page must keep usable height", page.height > 0f)
+    }
+
+    @Test
+    @Config(qualifiers = "w891dp-h411dp-land")
+    fun `in landscape the keyboard takes its room from the page, not the toolbar`() {
+        render()
+        val keyboard = 160
+        applyInsets(top = 28, bottom = 40, keyboard = keyboard)
+
+        val root = compose.onRoot().fetchSemanticsNode().boundsInRoot
+        val page = pageBounds()
+        val chrome = chromeBounds()
+        val keyboardTop = root.bottom - keyboard
+
+        assertTrue("the toolbar stays at the top", chrome.bottom <= page.top + 1f)
+        assertTrue(
+            "the page (${page.bottom}) runs under the keyboard (top $keyboardTop)",
+            page.bottom <= keyboardTop + 1f,
+        )
+        assertTrue("the page must keep usable height", page.height > 0f)
+    }
+
+    @Test
+    @Config(qualifiers = "w411dp-h891dp")
+    fun `the navigation bar and the keyboard are never counted twice`() {
+        render()
+        val navBar = 60
+        val keyboard = 320
+        applyInsets(top = 48, bottom = navBar, keyboard = keyboard)
+
+        val root = compose.onRoot().fetchSemanticsNode().boundsInRoot
+        // Adding the two would push the toolbar a navigation bar's height further up than the
+        // keyboard needs, leaving a band of dead space above it.
+        val omnibox = compose.onNodeWithText("Search or enter address").fetchSemanticsNode().boundsInRoot
+        val gap = (root.bottom - keyboard) - omnibox.bottom
+        assertTrue(
+            "the address bar sits ${gap}px above the keyboard; the two insets are being added " +
+                "rather than taken as the larger of the two",
+            gap < navBar.toFloat(),
+        )
+    }
+
+    @Test
+    @Config(qualifiers = "w411dp-h891dp")
+    fun `closing the keyboard gives the space back`() {
+        render()
+        applyInsets(top = 48, bottom = 60)
+        val before = pageBounds() to chromeBounds()
+
+        applyInsets(top = 48, bottom = 60, keyboard = 320)
+        assertTrue("the page must shrink for the keyboard", pageBounds().height < before.first.height)
+
+        applyInsets(top = 48, bottom = 60)
+        assertTrue("the page must return to its full height", pageBounds().height == before.first.height)
+        assertTrue("the toolbar must return", chromeBounds().bottom == before.second.bottom)
+    }
+
+    @Test
+    @Config(qualifiers = "w411dp-h891dp")
+    fun `the suggestion list never covers the address bar it is suggesting for`() {
+        render()
+        viewModel.focusOmnibox("")
+        viewModel.onOmniboxTextChanged("exa")
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(400))
+        compose.waitForIdle()
+        applyInsets(top = 48, bottom = 60, keyboard = 320)
+
+        val chrome = chromeBounds()
+        val scrim = compose.onNodeWithTag(OMNIBOX_SCRIM_TAG).fetchSemanticsNode().boundsInRoot
+        assertTrue(
+            "the editing layer (${scrim.bottom}) reaches over the toolbar (top ${chrome.top})",
+            scrim.bottom <= chrome.top + 1f,
+        )
+    }
+
+    @Test
+    @Config(qualifiers = "w411dp-h891dp")
+    fun `the toolbar holds still while the keyboard is up`() {
+        render()
+        applyInsets(top = 48, bottom = 60, keyboard = 320)
+
+        // Revealing a focused field makes the WebView scroll, and that scroll is the keyboard's
+        // doing, not the user's. Acting on it would take the address bar away mid-edit and
+        // resize the page a second time just as the field was being brought into view.
+        var y = 0
+        repeat(10) {
+            y += 60
+            viewModel.onPageScrolled(delta = 60, scrollY = y)
+        }
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(400))
+        compose.waitForIdle()
+
+        compose.onNodeWithContentDescription("Menu").assertIsDisplayed()
+        assertTrue("the toolbar must not collapse while typing", viewModel.chromeVisible)
+
+        // And once the keyboard is gone, scrolling works as it always did.
+        applyInsets(top = 48, bottom = 60)
+        repeat(10) {
+            y += 60
+            viewModel.onPageScrolled(delta = 60, scrollY = y)
+        }
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(400))
+        compose.waitForIdle()
+        assertTrue("scrolling must hide the toolbar again once the keyboard is gone", !viewModel.chromeVisible)
     }
 
     @Test

@@ -5,7 +5,7 @@ for, and the smallest amount of chrome needed to get to the next one.
 
 ## Installing
 
-`dist/vox-browser-1.8.apk` is a signed release build. Copy it to the phone and open it;
+`dist/vox-browser-1.9.apk` is a signed release build. Copy it to the phone and open it;
 Android will ask you to allow installs from your file manager the first time. Minimum Android
 8.0 (API 26).
 
@@ -116,6 +116,34 @@ edge and neither sits under one, recomputed from whatever the device reports rat
 assumptions about where the bars are. The case that motivates it is a navigation bar that moves
 to the side in landscape, which otherwise puts the menu button underneath it.
 
+**The keyboard.** The window does not resize for it. This browser draws edge to edge, which
+means the IME arrives as an inset like any other and nothing moves unless the layout moves it,
+so the keyboard is part of the same expression as the system bars and the cutout rather than a
+case handled somewhere else. The bottom inset is the *larger* of the navigation bar and the
+keyboard, never the two added together, and never a number: on a device that reports a 320dp
+keyboard the toolbar rises 320dp, and on one that reports 280 it rises 280.
+
+Left out of that expression — which is how it was — the toolbar stayed at the bottom of the
+window with the keyboard drawn on top of it, so the address bar could be typed into and not
+seen, and the page kept its full height with the bottom of it covered. One omission, both
+symptoms, in portrait and landscape alike.
+
+What the layout follows is the *target* of the IME animation rather than its current position.
+The page is a WebView, and following the animation would relayout and re-raster it on every
+frame of the keyboard sliding in — the same cost that made scrolling tear — for an effect
+nobody can see behind a moving keyboard. Settling once, at the size the keyboard is going to
+be, also means the page is asked to find room for the focused field exactly once. For the same
+reason the toolbar stops collapsing on scroll while the keyboard is up: revealing a focused
+field makes the page scroll, and that scroll is the keyboard's doing, not a request for more
+room.
+
+Giving the page the smaller viewport is only half of it, because only the page knows where
+inside itself the field being typed into actually is — in a scroller, in a fixed bar, in a
+cross-origin frame. So the other half is a small script at document start in every frame that
+watches the viewport and brings the focused element back into view when it changes. It asks for
+the nearest position rather than a particular one, so an element already visible is left alone
+and nothing fights the engine if the engine gets there first.
+
 Chrome visibility belongs to the tab, never to the browser, so a tab that scrolled its toolbar
 away cannot hand that state to one you have just opened or switched to — which on a page with
 nothing to scroll would leave no way to get it back. Navigating, switching, creating a tab,
@@ -219,6 +247,7 @@ cd tools && npm install && npm test      # the injected agent against a real DOM
 cd tools && node test-media-e2e.js       # fullscreen playback in real Chromium, on real video
 cd tools && node test-popup-guard.mjs    # the in-page guard against real pop-up techniques
 cd tools && node test-error-recovery.mjs # the content probe against real challenge pages
+cd tools && node test-keyboard-viewport.mjs # focused fields staying visible in a real engine
 ```
 
 The Android tests include `BrowserUiTest` and `MediaFullscreenTest`, which compose the actual
@@ -287,7 +316,8 @@ itself as unobservable rather than claiming a result it did not produce.
 data/    Room entities, DAOs, repository, settings
 web/     WebView configuration, clients, blocking, downloads, desktop mode, gestures, media
 web/filter/  the Adblock Plus rule parser, network matcher and element-hiding index
-assets/  media_agent.js and popup_guard.js, injected into every frame; filters/ — the lists
+assets/  media_agent.js, popup_guard.js and focus_visibility.js, injected into every frame;
+         filters/ — the blocking lists
 tools/   Node test suites and the filter-list build script (not part of the Gradle build)
 tabs/    Tab model, the live-WebView budget, session persistence
 ui/      Compose surface: browsing screen, chrome, overlays, dialogs, theme
