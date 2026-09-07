@@ -73,7 +73,7 @@ class ScrollRenderingTest {
         }
         viewModel = ViewModelProvider(viewModelStore, factory)[BrowserViewModel::class.java]
         viewModel.attach(app, SilentHost)
-        viewModel.bootstrap(null)
+        viewModel.bootstrapAndWait()
     }
 
     @After

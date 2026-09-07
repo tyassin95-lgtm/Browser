@@ -1,18 +1,18 @@
-# Slate
+# Vox
 
 A minimal Android browser. No homepage, no feed, no recommendations — just the page you asked
 for, and the smallest amount of chrome needed to get to the next one.
 
 ## Installing
 
-`dist/slate-browser-1.6.apk` is a signed release build. Copy it to the phone and open it;
+`dist/vox-browser-1.8.apk` is a signed release build. Copy it to the phone and open it;
 Android will ask you to allow installs from your file manager the first time. Minimum Android
 8.0 (API 26).
 
 To build it yourself:
 
 ```
-./gradlew assembleRelease      # dist-ready APK, R8-minified, ~1.5 MB
+./gradlew assembleRelease      # dist-ready APK, R8-minified
 ./gradlew assembleDebug        # unminified, debuggable
 ./gradlew testDebugUnitTest    # the full test suite
 ./gradlew lintDebug            # static analysis
@@ -165,20 +165,12 @@ decoys are skipped, and a canvas the player draws into is promoted alongside the
 so canvas-rendered players show a picture too. A watchdog re-asserts all of it against players
 that rewrite their own layout.
 
-**Media controls.** Play and pause, a scrub bar with position and duration, and volume. Double
-tap either side to jump ten seconds, accumulating while you keep tapping; the offset is applied
-in the page against the element's own position, because the copy held on the browser side is
-only ever as fresh as the last report.
+**Media controls.** Play and pause, a scrub bar with position and duration, and volume. The
+elapsed time follows the thumb while a drag is in progress and the stream the rest of the time,
+so the number and the bar never disagree mid-gesture.
 
-Dragging the scrub bar previews where you will land, at whichever of three levels the source
-allows. A second detached element given the same URL with CORS requested produces real
-thumbnails without disturbing playback; if the server does not allow it — or the stream was
-assembled by Media Source and has a source no second element can open — the playing video is
-seeked instead, so the fullscreen picture is itself the preview, rate limited so the decoder is
-not thrashed. Neither is possible at a live edge with no buffer, and then there is nothing to
-scrub anyway.
-A live stream is treated as live: no scrub bar where there is nothing to scrub, no double-tap
-seeking either, a DVR bar where the stream keeps a rewind buffer, and a badge that turns into
+A live stream is treated as live: no scrub bar where there is nothing to scrub, a DVR bar where
+the stream keeps a rewind buffer, and a badge that turns into
 one-tap "go live" once you are behind the edge. Controls fade out on their own and come back on
 a tap.
 
@@ -222,10 +214,11 @@ and it only accepts a call while the browser is genuinely waiting for one the us
 ## Tests
 
 ```
-./gradlew testDebugUnitTest             # 165 tests, Android framework via Robolectric
-cd tools && npm install && npm test     # 42 tests, the injected agent against a real DOM
-cd tools && node test-media-e2e.js      # seeking and previews in real Chromium, on real video
-cd tools && node test-popup-guard.mjs   # the in-page guard against real pop-up techniques
+./gradlew testDebugUnitTest              # Android framework via Robolectric
+cd tools && npm install && npm test      # the injected agent against a real DOM
+cd tools && node test-media-e2e.js       # fullscreen playback in real Chromium, on real video
+cd tools && node test-popup-guard.mjs    # the in-page guard against real pop-up techniques
+cd tools && node test-error-recovery.mjs # the content probe against real challenge pages
 ```
 
 The Android tests include `BrowserUiTest` and `MediaFullscreenTest`, which compose the actual
@@ -253,26 +246,27 @@ fail. `LayoutInsetsTest` dispatches real window insets into the composition and 
 bounds, so "the page never sits under the toolbar" and "the menu button never sits under a side
 navigation bar" are checked as geometry rather than assumed.
 
-Two suites answer the question a unit test cannot: *did the user's screen change?* The media
+Three suites answer the question a unit test cannot: *did the user's screen change?* The media
 suite drives the shipped agent inside real Chromium, over real HTTP with range requests, against
 a thirty-second clip whose every second is painted a different flat colour — so reading one
-pixel out of the decoded frame says where playback actually is. Double-tap seeking, scrub
-previews and Media Source streams are all checked that way: the preview is confirmed by
-decoding the image the agent produced and reading the second it depicts, not by observing that
-a callback fired. The pop-up suite runs the shipped in-page guard against a page that uses the
-real techniques — a transparent catcher over the play button, six windows from one tap, a
-notification prompt on arrival, an exit trap — and asserts on what the user gets: the play
-button receives the tap, no pop-under opens, and a genuine click-driven window still opens once.
-Each check is run with the guard off first, so a check that would pass either way is caught.
+pixel out of the decoded frame says where playback actually is. The seek bar, play, pause,
+volume, Media Source streams and a player in a cross-origin iframe are all checked that way.
+The pop-up suite runs the shipped in-page guard against a page that uses the real techniques —
+a transparent catcher over the play button, six windows from one tap, a notification prompt on
+arrival, an exit trap — and asserts on what the user gets: the play button receives the tap, no
+pop-under opens, and a genuine click-driven window still opens once. Each check is run with the
+guard off first, so a check that would pass either way is caught. The error suite runs the
+browser's own "did the server send anything" probe — the exact expression, lifted out of the
+Kotlin source — against anti-bot challenge bodies captured from live sites.
 
-Both found real defects that the unit tests had passed over. The fullscreen overlay's seek and
-scrub callbacks were never passed from the screen to the overlay at all: they carried no-op
-defaults, so every double tap and every drag was silently swallowed while the overlay animated
-as though it had worked, and the tests all called the ViewModel directly and never noticed.
-Those parameters no longer have defaults, so the compiler enforces the connection. The pop-up
-guard's first version intercepted `pointerdown`, which stopped the page's own handlers and
-therefore stopped the video from playing at all — visible immediately in the browser, invisible
-to any assertion about the guard's own state.
+Each of them found a defect the unit tests had passed over. The fullscreen overlay's seek
+callbacks were never passed from the screen to the overlay at all: they carried no-op defaults,
+so every drag was silently swallowed while the overlay animated as though it had worked, and
+the tests all called the ViewModel directly and never noticed. The pop-up guard's first version
+intercepted `pointerdown`, which stopped the page's own handlers and therefore stopped the video
+from playing at all. And the content probe's first version counted only visible text, which
+condemned exactly the page it exists to protect: a real Cloudflare challenge parses to four
+empty elements and fills them in from script a moment later.
 
 The blocking is checked against traffic the reported sites really produce: the third-party
 addresses embedded in the live markup of jav.guru, sxyprn.com, pimpbunny.com and
@@ -281,9 +275,11 @@ on the verdicts rather than on a score — the advertising and tracking hosts th
 are refused, and the hosts carrying their images and video are not. A blocker judged only on
 how much it blocks would rate well and leave you with a broken site.
 
-One environment limit worth naming: a Material3 text field inside a dialog never reports idle
+Two environment limits worth naming. A Material3 text field inside a dialog never reports idle
 under Robolectric, so those few dialogs are covered at the ViewModel level instead of by driving
-their UI.
+their UI. And desktop Chromium substitutes its own error document for a response with no body at
+all, where Android WebView leaves the page blank — so that one case in the error suite reports
+itself as unobservable rather than claiming a result it did not produce.
 
 ## Layout
 

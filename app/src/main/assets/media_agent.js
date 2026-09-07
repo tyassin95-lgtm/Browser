@@ -447,7 +447,6 @@
     activeCanvas = null;
     if (styleTag) { try { styleTag.remove(); } catch (e) { /* ignore */ } styleTag = null; }
     restoreViewport();
-    previewClose();
     stopProgressTicker();
     active = false;
     activeVideo = null;
@@ -473,17 +472,6 @@
       if (type === 'playPause') { if (v.paused) v.play(); else v.pause(); }
       else if (type === 'mute') { v.muted = !v.muted; }
       else if (type === 'seek') { seekTo(v, parseFloat(arg)); }
-      /*
-       * Relative seeking is resolved here rather than in the browser, against the element's own
-       * currentTime. The browser only ever holds a copy of the position that is as fresh as the
-       * last progress report, so computing "ten seconds back" there means computing it from a
-       * stale number — which reads as a gesture that animates and does not move the video, and
-       * makes repeated taps accumulate against the same stale base.
-       */
-      else if (type === 'seekBy') {
-        var delta = parseFloat(arg);
-        if (isFinite(delta)) seekTo(v, (v.currentTime || 0) + delta);
-      }
       else if (type === 'volume') {
         var level = parseFloat(arg);
         if (isFinite(level)) {
@@ -492,9 +480,6 @@
         }
       }
       else if (type === 'fill') { fillMode = arg; activeVideo = v; applyFill(); }
-      else if (type === 'previewOpen') { activeVideo = activeVideo || v; previewOpen(); return; }
-      else if (type === 'previewAt') { previewAt(arg); return; }
-      else if (type === 'previewClose') { previewClose(); return; }
     } catch (e) { /* ignore */ }
     scheduleReport();
   }
@@ -571,177 +556,6 @@
    */
   var progressTimer = null;
 
-  /*
-   * Scrub previews.
-   *
-   * A second, detached video element is pointed at the same source and seeked to wherever the
-   * finger is, then drawn into a small canvas. That only works when the source is a plain URL
-   * the element can be given again and the server allows the pixels to be read back: a stream
-   * assembled by Media Source has a blob: source no second element can open, and a cross-origin
-   * file without CORS taints the canvas and makes toDataURL throw. Both are common, so the
-   * failure is reported once and the browser falls back rather than retrying per frame.
-   */
-  var preview = null;
-
-  function previewReport(dataUrl, time) {
-    var message = { ns: NS, type: 'preview', data: dataUrl, t: time };
-    if (TOP) publishPreview(message); else post(parent, message);
-  }
-
-  function publishPreview(message) {
-    try {
-      if (window.SlateMedia && window.SlateMedia.preview) {
-        window.SlateMedia.preview(message.data || '', message.t || 0);
-      }
-    } catch (e) { /* ignore */ }
-  }
-
-  /*
-   * Previewing has three levels, chosen from what the source will actually allow.
-   *
-   *  - "frames": a second detached element is given the same URL with CORS requested. If it
-   *    loads, the server allows the pixels to be read back, so seeking it and drawing into a
-   *    canvas produces real thumbnails without disturbing playback.
-   *  - "inplace": the second element could not load it — no CORS headers, or a source only the
-   *    original element can open. The playing video is seeked instead, so the fullscreen frame
-   *    itself is the preview. This is what most cross-origin streams end up using, and it is
-   *    the behaviour of most native players when no storyboard exists.
-   *  - "none": nothing to preview against, such as a live edge with no rewind buffer.
-   *
-   * Requesting CORS is what decides between the first two: a server that does not allow it
-   * fails the load outright rather than silently handing back a canvas that cannot be read.
-   */
-  function previewMode(mode) {
-    var message = { ns: NS, type: 'previewMode', mode: mode };
-    if (TOP) publishPreviewMode(message); else post(parent, message);
-  }
-
-  function publishPreviewMode(message) {
-    try {
-      if (window.SlateMedia && window.SlateMedia.previewMode) {
-        window.SlateMedia.previewMode(message.mode || 'none');
-      }
-    } catch (e) { /* ignore */ }
-  }
-
-  function previewOpen() {
-    previewClose();
-    var v = activeVideo;
-    if (!v) { previewMode('none'); return; }
-
-    var window_ = seekableWindow(v);
-    var canSeek = (isFinite(v.duration) && v.duration > 0) ||
-                  (window_ && window_.end - window_.start > 1);
-    if (!canSeek) { previewMode('none'); return; }
-
-    var src = v.currentSrc || v.src || '';
-    if (!src || src.lastIndexOf('blob:', 0) === 0 || src.lastIndexOf('data:', 0) === 0) {
-      // Assembled by Media Source: no second element can open it, so scrub the real one.
-      preview = { mode: 'inplace', last: 0 };
-      previewMode('inplace');
-      return;
-    }
-
-    try {
-      var el = document.createElement('video');
-      el.muted = true;
-      el.preload = 'auto';
-      el.setAttribute('playsinline', '');
-      el.crossOrigin = 'anonymous';
-      var canvas = document.createElement('canvas');
-      canvas.width = 192;
-      canvas.height = 108;
-      preview = {
-        mode: 'pending', el: el, canvas: canvas, pending: null, busy: false, last: 0
-      };
-      el.addEventListener('loadedmetadata', function () {
-        if (!preview || preview.el !== el) return;
-        preview.mode = 'frames';
-        previewMode('frames');
-        if (preview.pending !== null) previewPump();
-      });
-      el.addEventListener('seeked', previewDraw);
-      el.addEventListener('error', previewDegrade);
-      el.src = src;
-      // A source that never resolves either way must not leave the scrubber waiting.
-      setTimeout(function () {
-        if (preview && preview.el === el && preview.mode === 'pending') previewDegrade();
-      }, 2500);
-    } catch (e) { previewDegrade(); }
-  }
-
-  /** The second element cannot have it, so fall back to scrubbing the real video. */
-  function previewDegrade() {
-    if (!preview) return;
-    previewDestroyElement();
-    preview = { mode: 'inplace', last: 0 };
-    previewMode('inplace');
-  }
-
-  function previewAt(seconds) {
-    var t = parseFloat(seconds);
-    if (!preview || !isFinite(t)) return;
-
-    if (preview.mode === 'inplace') {
-      // Seeking the playing element on every frame of a drag would thrash the decoder, so it
-      // moves at a rate a person can actually perceive.
-      var now = Date.now();
-      if (now - preview.last < 120) { preview.queued = t; return; }
-      preview.last = now;
-      preview.queued = null;
-      if (activeVideo) seekTo(activeVideo, t);
-      return;
-    }
-
-    preview.pending = t;
-    if (preview.mode === 'frames' && !preview.busy) previewPump();
-  }
-
-  function previewPump() {
-    if (!preview || preview.mode !== 'frames' || preview.pending === null) return;
-    var t = preview.pending;
-    preview.pending = null;
-    preview.busy = true;
-    try { preview.el.currentTime = t; } catch (e) { previewDegrade(); }
-  }
-
-  function previewDraw() {
-    if (!preview || preview.mode !== 'frames') return;
-    try {
-      var el = preview.el;
-      var canvas = preview.canvas;
-      var ctx = canvas.getContext('2d');
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      // Letterboxed, never stretched: a squashed preview misreads the frame.
-      var vw = el.videoWidth || 16, vh = el.videoHeight || 9;
-      var scale = Math.min(canvas.width / vw, canvas.height / vh);
-      var w = vw * scale, h = vh * scale;
-      ctx.drawImage(el, (canvas.width - w) / 2, (canvas.height - h) / 2, w, h);
-      previewReport(canvas.toDataURL('image/jpeg', 0.55), el.currentTime);
-    } catch (e) {
-      // A canvas that turned out to be tainted after all.
-      previewDegrade();
-      return;
-    }
-    preview.busy = false;
-    if (preview.pending !== null) previewPump();
-  }
-
-  function previewDestroyElement() {
-    if (!preview || !preview.el) return;
-    try {
-      preview.el.removeAttribute('src');
-      preview.el.load();
-    } catch (e) { /* ignore */ }
-  }
-
-  function previewClose() {
-    if (!preview) return;
-    previewDestroyElement();
-    preview = null;
-  }
-
   function reportProgressNow() {
     if (progressTimer) { clearTimeout(progressTimer); progressTimer = null; }
     if (!active) return;
@@ -815,14 +629,6 @@
       if (d.score > 0 && (!state.best || d.score > state.best.score)) {
         state.best = { score: d.score, info: d.info, child: fromChild };
       }
-      return;
-    }
-    if (d.type === 'preview') {
-      if (TOP) publishPreview(d); else post(parent, d);
-      return;
-    }
-    if (d.type === 'previewMode') {
-      if (TOP) publishPreviewMode(d); else post(parent, d);
       return;
     }
     if (d.type === 'progress') {

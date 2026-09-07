@@ -185,6 +185,24 @@ class TabManager(
         tabs.filter { it.id != activeTabId }.forEach { hibernate(it) }
     }
 
+    /**
+     * Drops a tab's WebView after its renderer has died.
+     *
+     * Nothing may be asked of the view once the renderer is gone — `saveState` included, which
+     * is why this cannot go through [hibernate] — so the address the tab already knows becomes
+     * the pending load and the view is simply released. Reading `tab.webView` afterwards builds
+     * a fresh one and re-issues that load, so the page comes back by itself.
+     */
+    fun discardDeadWebView(tab: Tab) {
+        val webView = tab.webView ?: return
+        tab.webView = null
+        tab.savedState = null
+        tab.media = MediaState.NONE
+        tab.pendingUrl = tab.url.takeIf { it.isNotBlank() }
+        runCatching { (webView.parent as? ViewGroup)?.removeView(webView) }
+        runCatching { webView.destroy() }
+    }
+
     private fun destroy(tab: Tab) {
         val webView = tab.webView ?: return
         tab.webView = null

@@ -51,8 +51,6 @@ import com.slate.browser.web.MediaFit
 import com.slate.browser.web.LinkContext
 import com.slate.browser.web.LinkContextResolver
 import com.slate.browser.web.MediaState
-import com.slate.browser.web.ScrubPreview
-import com.slate.browser.web.ScrubPreviewMode
 import com.slate.browser.web.NavigationDirection
 import com.slate.browser.web.NavigationGestureListener
 import com.slate.browser.web.SlateWebView
@@ -66,8 +64,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -176,13 +174,6 @@ class BrowserViewModel @JvmOverloads constructor(
     var mediaFit by mutableStateOf(MediaFit.CONTAIN)
         private set
 
-    /** The frame under the finger while scrubbing, when the page can produce one. */
-    var scrubPreview by mutableStateOf<ScrubPreview?>(null)
-        private set
-
-    /** What the page can offer while scrubbing this source. */
-    var scrubPreviewMode by mutableStateOf(ScrubPreviewMode.NONE)
-        private set
     /** A page asking to leave the browser, waiting on the user to say whether it may. */
     var externalLaunch by mutableStateOf<ExternalLaunch?>(null)
         private set
@@ -248,22 +239,39 @@ class BrowserViewModel @JvmOverloads constructor(
         activityContext = null
     }
 
-    /** Called once, after [attach], to put the browser into a usable state. */
+    private var bootstrapped = false
+
+    /**
+     * Called once, after [attach], to put the browser into a usable state.
+     *
+     * The stored preferences are read before anything is decided. [settings] is a state flow
+     * that starts on the defaults and only becomes the user's a moment later, so deciding from
+     * it here would restore a session on every launch — including for a user who has turned
+     * that off — which is why the whole thing is deferred until the real value arrives.
+     */
     fun bootstrap(initialUrl: String?) {
-        if (tabManager.count > 0) {
+        if (bootstrapped) {
             if (initialUrl != null) openInNewTabAndSwitch(initialUrl)
             return
         }
-        val restored = if (settings.value.restoreTabs) persistence.load() else null
-        if (restored != null) {
-            tabManager.restore(restored)
-        }
-        if (initialUrl != null) {
-            openInNewTabAndSwitch(initialUrl)
-        } else if (tabManager.count == 0) {
-            // Launching is not a request to type. The browser comes up on the page, with the
-            // keyboard down and nothing overlaying it; the omnibox opens when the user taps it.
-            newTab(focusOmnibox = false)
+        bootstrapped = true
+        viewModelScope.launch {
+            val stored = runCatching { settingsStore.settings.first() }.getOrDefault(Settings())
+            if (stored.restoreTabs) {
+                // A session file that cannot be read is a session that is not restored, never a
+                // launch that fails.
+                runCatching { persistence.load() }.getOrNull()?.let { tabManager.restore(it) }
+            } else {
+                // Not merely ignored: a session left on disk would come back the moment the
+                // setting was turned on again, which is not what "do not reopen tabs" means.
+                persistence.clear()
+            }
+            when {
+                initialUrl != null -> openInNewTabAndSwitch(initialUrl)
+                // Launching is not a request to type. The browser comes up on the page, with
+                // the keyboard down and nothing over it; the omnibox opens when it is tapped.
+                tabManager.count == 0 -> newTab(focusOmnibox = false)
+            }
         }
     }
 
@@ -409,10 +417,42 @@ class BrowserViewModel @JvmOverloads constructor(
         activeTab?.webView?.takeIf { it.canGoForward() }?.goForward()
     }
 
+    /**
+     * Loads the page again.
+     *
+     * A failed navigation can leave the WebView with no history entry to reload — reloading
+     * nothing is why Retry sometimes appeared to do nothing at all — so the address is loaded
+     * outright whenever there is no document to refresh.
+     */
     fun reload() {
         val tab = activeTab ?: return
         tab.errorMessage = null
-        tabManager.webViewFor(tab).reload()
+        tab.isLoading = true
+        val webView = tabManager.webViewFor(tab)
+        val current = webView.url
+        if (current.isNullOrBlank() || current == "about:blank") {
+            if (tab.url.isNotBlank()) webView.loadUrl(tab.url) else tab.isLoading = false
+        } else {
+            webView.reload()
+        }
+    }
+
+    /**
+     * Rebuilds a tab whose renderer Android has taken away.
+     *
+     * This is not a page error and must not be reported as one: the document is gone through no
+     * fault of the site, and the recovery is to build a new WebView and load the same address.
+     * Reading the tab's WebView is what does that, so for the tab on screen it happens by
+     * itself; the rest are left to be rebuilt when they are next looked at.
+     */
+    private fun recoverFromRendererLoss(tab: Tab, crashed: Boolean) {
+        tabManager.discardDeadWebView(tab)
+        tab.errorMessage = null
+        if (tab.id == tabManager.activeTabId) {
+            exitMediaFullscreen()
+            tabManager.webViewFor(tab)
+            if (crashed) snack("The page crashed and was reloaded")
+        }
     }
 
     fun stopLoading() {
@@ -442,11 +482,16 @@ class BrowserViewModel @JvmOverloads constructor(
 
     // ---- Omnibox ------------------------------------------------------------
 
+    private var suggestionJob: Job? = null
+
     fun focusOmnibox(text: String? = null) {
         omniboxText = text ?: activeTab?.url.orEmpty()
         isOmniboxFocused = true
         showChrome()
-        updateSuggestions(omniboxText)
+        // Opening the address bar is not typing in it. Nothing is suggested until the text
+        // actually changes, so focusing never puts browsing history on screen by itself.
+        suggestionJob?.cancel()
+        suggestions = emptyList()
     }
 
     fun blurOmnibox() {
@@ -458,8 +503,6 @@ class BrowserViewModel @JvmOverloads constructor(
         omniboxText = text
         updateSuggestions(text)
     }
-
-    private var suggestionJob: Job? = null
 
     private fun updateSuggestions(query: String) {
         suggestionJob?.cancel()
@@ -592,8 +635,6 @@ class BrowserViewModel @JvmOverloads constructor(
         if (!isMediaFullscreen) return
         isMediaFullscreen = false
         isImmersive = false
-        scrubPreview = null
-        scrubPreviewMode = ScrubPreviewMode.NONE
         lockLandscapeForMedia = false
         showChrome()
         activeTab?.webView?.let { webView ->
@@ -623,49 +664,6 @@ class BrowserViewModel @JvmOverloads constructor(
 
     fun seekMedia(positionMs: Long) {
         activeTab?.webView?.let { mediaAgent.seekTo(it, positionMs) }
-    }
-
-    /**
-     * Seeks by a relative amount.
-     *
-     * The offset is sent as an offset: the page applies it to the element's own currentTime and
-     * clamps it to what the stream will accept. Resolving it here instead would compute from
-     * the position last reported, which is why a gesture could animate without the video
-     * moving, and why repeated taps would not accumulate.
-     */
-    fun nudgeMedia(deltaMs: Long) {
-        val state = media
-        if (!state.isSeekable && !state.hasLiveWindow) return
-        activeTab?.webView?.let { mediaAgent.seekBy(it, deltaMs) }
-    }
-
-    /** A preview frame from the page. */
-    internal fun onScrubPreview(frame: ScrubPreview?) {
-        scrubPreview = frame
-    }
-
-    internal fun onScrubPreviewMode(mode: ScrubPreviewMode) {
-        scrubPreviewMode = mode
-    }
-
-    fun beginScrub() {
-        scrubPreview = null
-        scrubPreviewMode = ScrubPreviewMode.NONE
-        activeTab?.webView?.let { mediaAgent.openScrubPreview(it) }
-    }
-
-    /**
-     * Follows the finger. What this does depends on what the source allows: it either fetches a
-     * thumbnail from a second element, or moves the playing video so the picture behind the
-     * scrubber is itself the preview.
-     */
-    fun scrubTo(positionMs: Long) {
-        activeTab?.webView?.let { mediaAgent.previewAt(it, positionMs) }
-    }
-
-    fun endScrub() {
-        scrubPreview = null
-        activeTab?.webView?.let { mediaAgent.closeScrubPreview(it) }
     }
 
     /** Returns to the live edge of a stream the viewer has scrubbed back from. */
@@ -985,6 +983,7 @@ class BrowserViewModel @JvmOverloads constructor(
             policy = navigationPolicy,
             onNavigationBlocked = { url, reason -> onNavigationBlocked(url, reason) },
             onConfirmExternal = { url, label -> externalLaunch = ExternalLaunch(url, label) },
+            onRendererGone = { target, crashed -> recoverFromRendererLoss(target, crashed) },
         )
 
         webView.webChromeClient = SlateWebChromeClient(
@@ -1036,8 +1035,6 @@ class BrowserViewModel @JvmOverloads constructor(
             mediaAgent.Bridge(
                 onState = { state -> onMediaState(tab, state) },
                 onNavigationHint = { suppress -> onNavigationHint(tab, suppress) },
-                onPreview = { frame -> onScrubPreview(frame) },
-                onPreviewMode = { mode -> scrubPreviewMode = mode },
                 onEnterResult = { success ->
                     if (!success && isMediaFullscreen) {
                         exitMediaFullscreen()

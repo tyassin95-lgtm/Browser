@@ -7,8 +7,11 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import androidx.datastore.preferences.core.emptyPreferences
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
+import java.io.IOException
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore("slate_settings")
 
@@ -50,7 +53,19 @@ data class Settings(
 
 class SettingsStore(private val context: Context) {
 
-    val settings: Flow<Settings> = context.dataStore.data.map { p ->
+    /**
+     * The stored preferences, or the defaults if they cannot be read.
+     *
+     * DataStore reports a corrupt or unreadable file by throwing into the flow. Letting that
+     * through would take the whole browser down at launch — the startup path waits on this
+     * value before it decides anything — over a preferences file, so an unreadable one is
+     * treated as an unset one.
+     */
+    val settings: Flow<Settings> = context.dataStore.data
+        .catch { failure ->
+            if (failure is IOException) emit(emptyPreferences()) else throw failure
+        }
+        .map { p ->
         Settings(
             themeMode = p[Keys.THEME]?.let { runCatching { ThemeMode.valueOf(it) }.getOrNull() }
                 ?: ThemeMode.SYSTEM,

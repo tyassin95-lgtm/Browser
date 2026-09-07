@@ -9,8 +9,13 @@ import android.webkit.WebChromeClient
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.longClick
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTouchInput
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.viewmodel.initializer
@@ -19,9 +24,12 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.slate.browser.data.AppDatabase
 import com.slate.browser.data.BrowserRepository
+import kotlinx.coroutines.runBlocking
 import com.slate.browser.data.ThemeMode
 import com.slate.browser.BackAction
 import com.slate.browser.ui.BrowserScreen
+import com.slate.browser.ui.CHROME_TAG
+import com.slate.browser.ui.OMNIBOX_SCRIM_TAG
 import com.slate.browser.ui.theme.SlateTheme
 import com.slate.browser.web.BrowserHost
 import org.junit.After
@@ -70,7 +78,7 @@ class BrowserUiTest {
         }
         viewModel = ViewModelProvider(viewModelStore, factory)[BrowserViewModel::class.java]
         viewModel.attach(app, host)
-        viewModel.bootstrap(null)
+        viewModel.bootstrapAndWait()
     }
 
     @After
@@ -81,6 +89,33 @@ class BrowserUiTest {
         viewModelStore.clear()
         repeat(5) { org.robolectric.shadows.ShadowLooper.idleMainLooper() }
         runCatching { db.close() }
+    }
+
+    /**
+     * Lets the ViewModel's coroutines and the database actually run.
+     *
+     * The scheduler's clock is advanced as well as idled: suggestion lookups are debounced, and
+     * a paused looper never reaches a delayed task on wall-clock time alone.
+     */
+    private fun pump(millis: Long = 500) {
+        val looper = org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+        val deadline = System.currentTimeMillis() + millis
+        while (System.currentTimeMillis() < deadline) {
+            looper.idleFor(java.time.Duration.ofMillis(50))
+            Thread.sleep(2)
+        }
+        compose.waitForIdle()
+    }
+
+    private fun pumpUntil(reason: String, condition: () -> Boolean) {
+        val looper = org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+        val deadline = System.currentTimeMillis() + 5_000
+        while (!condition() && System.currentTimeMillis() < deadline) {
+            looper.idleFor(java.time.Duration.ofMillis(50))
+            Thread.sleep(2)
+        }
+        compose.waitForIdle()
+        assertTrue(reason, condition())
     }
 
     private fun render() {
@@ -133,18 +168,72 @@ class BrowserUiTest {
     }
 
     @Test
-    fun `tapping outside the omnibox dismisses it and gives the toolbar back`() {
+    fun `a launch shows no history and asks the database for none`() {
+        // The complaint this answers: previously visited sites appearing on their own when the
+        // browser was opened. They must not be on screen, and they must not be fetched either.
+        val visited = listOf("https://news.example.com/", "https://shop.example.com/", "https://wiki.example.com/")
+        runBlocking { visited.forEach { BrowserRepository(db).recordVisit(it, it) } }
         render()
-        // A launch is not a request to type, so the omnibox starts closed. Once the user opens
-        // it, the first tap elsewhere must put it away rather than being swallowed.
+        compose.waitForIdle()
+
+        // Given every chance to appear before being declared absent.
+        pump()
+        assertTrue("nothing may be suggested on launch", viewModel.suggestions.isEmpty())
+        assertFalse(viewModel.isOmniboxFocused)
+
+        // Opening the address bar is still not a request to see history.
+        viewModel.focusOmnibox()
+        compose.waitForIdle()
+        pump()
+        assertTrue("focusing must not fetch history", viewModel.suggestions.isEmpty())
+        visited.forEach { url ->
+            compose.onAllNodesWithText(url, substring = true).assertCountEquals(0)
+        }
+
+        // Typing is what asks for them.
+        viewModel.onOmniboxTextChanged("shop")
+        pumpUntil("typing must produce suggestions") { viewModel.suggestions.isNotEmpty() }
+
+        // And clearing the text puts them away again rather than falling back to a default list.
+        viewModel.onOmniboxTextChanged("")
+        pumpUntil("an empty query suggests nothing") { viewModel.suggestions.isEmpty() }
+    }
+
+    @Test
+    fun `the toolbar keeps working while the omnibox is open`() {
+        render()
+        // A launch is not a request to type, so the omnibox starts closed.
         assertFalse("a fresh launch must not focus the omnibox", viewModel.isOmniboxFocused)
         viewModel.focusOmnibox("")
         compose.waitForIdle()
         assertTrue(viewModel.isOmniboxFocused)
+
+        // The editing layer must not be laid over the toolbar: a tap on the tab button has to
+        // reach the tab button, not a dismiss listener sitting on top of it.
         compose.onNodeWithContentDescription("1 open tabs").performClick()
         compose.waitForIdle()
         assertFalse(viewModel.isOmniboxFocused)
-        assertEquals(Overlay.NONE, viewModel.overlay)
+        assertEquals(Overlay.TABS, viewModel.overlay)
+    }
+
+    @Test
+    fun `the omnibox editing layer never covers the toolbar`() {
+        render()
+        viewModel.focusOmnibox("example.com/some/path")
+        compose.waitForIdle()
+
+        // This is what selection, caret placement and the copy/paste menu all depend on: the
+        // address bar has to be the topmost thing at its own coordinates. It was not — the
+        // dimming layer was laid over the whole screen with a tap-to-dismiss listener on it, so
+        // the keyboard still worked but every touch on the field was read as "dismiss", and
+        // text could be typed and never selected, copied or pasted.
+        val chrome = compose.onNodeWithTag(CHROME_TAG).fetchSemanticsNode().boundsInRoot
+        val scrim = compose.onNodeWithTag(OMNIBOX_SCRIM_TAG).fetchSemanticsNode().boundsInRoot
+        assertTrue("the editing layer must exist to be checked", scrim.height > 0f)
+        assertTrue(
+            "the dimming layer (${scrim}) overlaps the toolbar (${chrome})",
+            scrim.bottom <= chrome.top + 0.5f || scrim.top >= chrome.bottom - 0.5f,
+        )
     }
 
     @Test

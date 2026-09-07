@@ -4,7 +4,6 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -12,8 +11,6 @@ import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -29,8 +26,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CropFree
-import androidx.compose.material.icons.rounded.FastForward
-import androidx.compose.material.icons.rounded.FastRewind
 import androidx.compose.material.icons.rounded.Fullscreen
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -52,10 +47,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -63,7 +56,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.slate.browser.ui.theme.Motion
 import com.slate.browser.web.MediaState
-import com.slate.browser.web.ScrubPreview
 import kotlinx.coroutines.delay
 import java.util.Locale
 
@@ -96,15 +88,6 @@ fun MediaFullscreenOverlay(
     onSeek: (Long) -> Unit,
     onJumpToLive: () -> Unit,
     onVolume: (Float) -> Unit,
-    // No defaults on the callbacks below: a caller that forgets one must fail to compile.
-    // They were optional once, and an omitted argument silently swallowed every double-tap
-    // seek and every scrub update while the overlay still animated as though it had worked.
-    scrubPreview: ScrubPreview?,
-    scrubbingMovesVideo: Boolean,
-    onScrubStart: () -> Unit,
-    onScrubTo: (Long) -> Unit,
-    onScrubEnd: () -> Unit,
-    onNudge: (Long) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val owned = mode == MediaOverlayMode.BROWSER
@@ -121,16 +104,6 @@ fun MediaFullscreenOverlay(
         showVolume = false
     }
 
-    // Double-tap seeking. Consecutive taps on the same side accumulate, the way mobile players
-    // behave, so three quick taps move thirty seconds rather than ten.
-    val canSeek = media.isSeekable || media.hasLiveWindow
-    var seekFeedback by remember { mutableStateOf<SeekFeedback?>(null) }
-    LaunchedEffect(seekFeedback) {
-        if (seekFeedback == null) return@LaunchedEffect
-        delay(SEEK_FEEDBACK_MS)
-        seekFeedback = null
-    }
-
     val gestures = Modifier
         .pointerInput(Unit) {
             val threshold = EXIT_DRAG_DISTANCE.toPx()
@@ -140,33 +113,11 @@ fun MediaFullscreenOverlay(
                 onDragEnd = { if (travelled > threshold) onExit() },
             ) { _, amount -> travelled += amount }
         }
-        .pointerInput(canSeek) {
-            val width = size.width
-            detectTapGestures(
-                onTap = {
-                    controlsVisible = !controlsVisible
-                    touch()
-                },
-                onDoubleTap = { offset ->
-                    if (!canSeek) return@detectTapGestures
-                    // The middle of the screen is left alone: a double tap there is ambiguous,
-                    // and seeking on it would fight the tap that shows the controls.
-                    val forward = when {
-                        offset.x < width * SEEK_ZONE -> false
-                        offset.x > width * (1f - SEEK_ZONE) -> true
-                        else -> return@detectTapGestures
-                    }
-                    val previous = seekFeedback
-                    val accumulated = if (previous != null && previous.forward == forward) {
-                        previous.seconds + SEEK_STEP_SECONDS
-                    } else {
-                        SEEK_STEP_SECONDS
-                    }
-                    seekFeedback = SeekFeedback(forward, accumulated)
-                    onNudge(if (forward) SEEK_STEP_SECONDS * 1000L else -SEEK_STEP_SECONDS * 1000L)
-                    touch()
-                },
-            )
+        .pointerInput(Unit) {
+            detectTapGestures {
+                controlsVisible = !controlsVisible
+                touch()
+            }
         }
 
     Box(modifier.fillMaxSize()) {
@@ -201,11 +152,6 @@ fun MediaFullscreenOverlay(
                     TransportBar(
                         media = media,
                         showVolume = showVolume,
-                        scrubPreview = scrubPreview,
-                        scrubbingMovesVideo = scrubbingMovesVideo,
-                        onScrubStart = onScrubStart,
-                        onScrubTo = onScrubTo,
-                        onScrubEnd = onScrubEnd,
                         onTogglePlay = { onTogglePlay(); touch() },
                         onToggleMute = { onToggleMute(); touch() },
                         onToggleVolumePanel = { showVolume = !showVolume; touch() },
@@ -215,10 +161,6 @@ fun MediaFullscreenOverlay(
                     )
                 }
             }
-        }
-
-        seekFeedback?.let { feedback ->
-            SeekFeedbackIndicator(feedback, Modifier.fillMaxSize())
         }
 
         HintPill(
@@ -272,11 +214,6 @@ private fun TopControls(
 private fun TransportBar(
     media: MediaState,
     showVolume: Boolean,
-    scrubPreview: ScrubPreview?,
-    scrubbingMovesVideo: Boolean,
-    onScrubStart: () -> Unit,
-    onScrubTo: (Long) -> Unit,
-    onScrubEnd: () -> Unit,
     onTogglePlay: () -> Unit,
     onToggleMute: () -> Unit,
     onToggleVolumePanel: () -> Unit,
@@ -301,19 +238,6 @@ private fun TransportBar(
             .navigationBarsPadding()
             .padding(start = 8.dp, end = 8.dp, top = 24.dp, bottom = 10.dp),
     ) {
-        if (scrubbing && scrubbable) {
-            val span = (end - start).coerceAtLeast(1f)
-            ScrubPreviewCard(
-                preview = scrubPreview,
-                movesVideo = scrubbingMovesVideo,
-                positionMs = scrubPosition.toLong(),
-                isLive = media.isLive,
-                behindLiveMs = (end - scrubPosition).toLong(),
-                fraction = ((scrubPosition - start) / span).coerceIn(0f, 1f),
-                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
-            )
-        }
-
         AnimatedVisibility(visible = showVolume) {
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
@@ -344,25 +268,26 @@ private fun TransportBar(
 
             if (scrubbable) {
                 Spacer(Modifier.width(4.dp))
+                // While a drag is in progress the label reads the thumb, not the stream, so
+                // the number and the bar never disagree mid-gesture.
                 TimeLabel(
-                    if (media.isSeekable) media.positionMs else -media.behindLiveMs,
+                    when {
+                        scrubbing -> if (media.isSeekable) scrubPosition.toLong() else (scrubPosition - end).toLong()
+                        media.isSeekable -> media.positionMs
+                        else -> -media.behindLiveMs
+                    },
                     signed = !media.isSeekable,
                 )
                 Spacer(Modifier.width(8.dp))
                 Slider(
                     value = position.coerceIn(start, maxOf(start, end)),
                     onValueChange = {
-                        if (!scrubbing) {
-                            scrubbing = true
-                            onScrubStart()
-                        }
+                        scrubbing = true
                         scrubPosition = it
-                        onScrubTo(it.toLong())
                     },
                     onValueChangeFinished = {
                         scrubbing = false
                         onSeek(scrubPosition.toLong())
-                        onScrubEnd()
                     },
                     valueRange = start..maxOf(start + 1f, end),
                     colors = whiteSlider(),
@@ -511,98 +436,7 @@ private fun scrimGradient() = androidx.compose.ui.graphics.Brush.verticalGradien
     listOf(Color.Transparent, Color.Black.copy(alpha = 0.55f)),
 )
 
-/**
- * Where the finger is about to land.
- *
- * A frame from that position when the page can produce one — see the agent for why it often
- * cannot — and the timestamp either way. The card follows the thumb rather than sitting in the
- * middle, so the association between the two is never in doubt.
- */
-@Composable
-private fun ScrubPreviewCard(
-    preview: ScrubPreview?,
-    movesVideo: Boolean,
-    positionMs: Long,
-    isLive: Boolean,
-    behindLiveMs: Long,
-    fraction: Float,
-    modifier: Modifier = Modifier,
-) {
-    BoxWithConstraints(modifier) {
-        // With no thumbnail the video itself is moving behind the scrubber, so the card shrinks
-        // to the timestamp rather than reserving space for a picture that is not coming.
-        val cardWidth = if (preview != null && !movesVideo) PREVIEW_WIDTH else TIME_BUBBLE_WIDTH
-        val travel = (maxWidth - cardWidth).coerceAtLeast(0.dp)
-        Column(
-            Modifier
-                .padding(start = travel * fraction)
-                .width(cardWidth)
-                .clip(RoundedCornerShape(10.dp))
-                .background(Color.Black.copy(alpha = 0.72f)),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            preview?.takeIf { !movesVideo }?.let { frame ->
-                Image(
-                    bitmap = frame.frame.asImageBitmap(),
-                    contentDescription = null,
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(16f / 9f)
-                        .clip(RoundedCornerShape(topStart = 10.dp, topEnd = 10.dp)),
-                )
-            }
-            Text(
-                text = if (isLive) "-" + formatDuration(behindLiveMs) else formatDuration(positionMs),
-                color = Color.White,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-            )
-        }
-    }
-}
-
-/** Which way a double tap seeks, and how far the current burst has accumulated. */
-private data class SeekFeedback(val forward: Boolean, val seconds: Int)
-
-@Composable
-private fun SeekFeedbackIndicator(feedback: SeekFeedback, modifier: Modifier = Modifier) {
-    Box(modifier) {
-        Row(
-            Modifier
-                .align(if (feedback.forward) Alignment.CenterEnd else Alignment.CenterStart)
-                .padding(horizontal = 40.dp)
-                .clip(RoundedCornerShape(percent = 50))
-                .background(Color.Black.copy(alpha = 0.55f))
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Icon(
-                imageVector = if (feedback.forward) Icons.Rounded.FastForward else Icons.Rounded.FastRewind,
-                contentDescription = null,
-                tint = Color.White,
-                modifier = Modifier.size(22.dp),
-            )
-            Text(
-                text = "${feedback.seconds}s",
-                color = Color.White,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
-        }
-    }
-}
-
 private const val CONTROLS_TIMEOUT_MS = 3_600L
-private const val SEEK_FEEDBACK_MS = 850L
-private const val SEEK_STEP_SECONDS = 10
-
-/** How much of each edge answers a double tap; the middle stays a plain tap. */
-private const val SEEK_ZONE = 0.35f
-private val PREVIEW_WIDTH = 148.dp
-private val TIME_BUBBLE_WIDTH = 68.dp
 private const val HINT_TIMEOUT_MS = 2_600L
 private val EXIT_DRAG_DISTANCE = 72.dp
 private val EDGE_STRIP_HEIGHT = 40.dp

@@ -10,8 +10,6 @@ import android.os.Environment
 import android.util.Base64
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
-import android.webkit.MimeTypeMap
-import android.webkit.URLUtil
 import android.webkit.WebView
 import androidx.core.content.getSystemService
 import java.io.File
@@ -37,10 +35,13 @@ class DownloadCoordinator(
     }
 
     private fun enqueueHttp(url: String, userAgent: String?, contentDisposition: String?, mimeType: String?) {
-        val fileName = URLUtil.guessFileName(url, contentDisposition, mimeType)
+        val (fileName, mime) = DownloadNaming.resolve(url, contentDisposition, mimeType)
         val result = runCatching {
             val request = DownloadManager.Request(Uri.parse(url)).apply {
-                setMimeType(mimeType)
+                // The resolved type, not the one the server declared: a video announced as
+                // `application/octet-stream` has to reach the media store as a video, or
+                // nothing on the device will offer to play it.
+                setMimeType(mime)
                 addRequestHeader("User-Agent", userAgent ?: "")
                 addRequestHeader("Cookie", CookieManager.getInstance().getCookie(url) ?: "")
                 setTitle(fileName)
@@ -64,7 +65,11 @@ class DownloadCoordinator(
             val payload = url.substringAfter("base64,", "")
             require(payload.isNotEmpty()) { "unsupported data URL" }
             val bytes = Base64.decode(payload, Base64.DEFAULT)
-            writeToDownloads(defaultName(mimeType), bytes)
+            // A data URL declares its own type ahead of the comma; that beats whatever the
+            // download listener was told.
+            val declared = url.removePrefix("data:").substringBefore(';').substringBefore(',')
+            val resolved = DownloadNaming.resolveForBytes(declared.ifBlank { mimeType })
+            writeToDownloads(resolved.fileName, bytes)
         }.onSuccess { host.snack("Saved ${it.name}") }
             .onFailure { host.snack("Couldn't save this file") }
     }
@@ -110,7 +115,7 @@ class DownloadCoordinator(
                 val payload = dataUrl.substringAfter("base64,", "")
                 require(payload.isNotEmpty())
                 val bytes = Base64.decode(payload, Base64.DEFAULT)
-                writeToDownloads(defaultName(mimeType.ifBlank { null }), bytes)
+                writeToDownloads(DownloadNaming.resolveForBytes(mimeType.ifBlank { null }).fileName, bytes)
             }.onSuccess { host.snack("Saved ${it.name}") }
                 .onFailure { host.snack("Couldn't save this file") }
         }
@@ -128,7 +133,7 @@ class DownloadCoordinator(
      * API 29+, and a plain file on the older releases this app still supports.
      */
     private fun writeToDownloads(name: String, bytes: ByteArray): SavedFile {
-        val mime = guessMime(name)
+        val mime = DownloadNaming.mimeForFileName(name)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, name)
@@ -173,17 +178,6 @@ class DownloadCoordinator(
             index++
         }
         return candidate
-    }
-
-    private fun defaultName(mimeType: String?): String {
-        val extension = mimeType?.let { MimeTypeMap.getSingleton().getExtensionFromMimeType(it) }
-        val stamp = System.currentTimeMillis()
-        return if (extension.isNullOrBlank()) "download-$stamp" else "download-$stamp.$extension"
-    }
-
-    private fun guessMime(name: String): String {
-        val extension = name.substringAfterLast('.', "")
-        return MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension) ?: "application/octet-stream"
     }
 
     @Suppress("FunctionName")

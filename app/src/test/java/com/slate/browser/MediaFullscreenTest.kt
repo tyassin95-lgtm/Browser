@@ -27,7 +27,6 @@ import com.slate.browser.web.BrowserHost
 import com.slate.browser.web.MediaAgent
 import com.slate.browser.web.MediaFit
 import com.slate.browser.web.MediaState
-import com.slate.browser.web.ScrubPreviewMode
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -79,7 +78,7 @@ class MediaFullscreenTest {
         }
         viewModel = ViewModelProvider(viewModelStore, factory)[BrowserViewModel::class.java]
         viewModel.attach(app, SilentHost)
-        viewModel.bootstrap(null)
+        viewModel.bootstrapAndWait()
     }
 
     @After
@@ -396,101 +395,6 @@ class MediaFullscreenTest {
     }
 
     // ---- Seeking gestures ----------------------------------------------------
-
-    @Test
-    fun `relative seeking is clamped to the recording`() {
-        render()
-        playing(
-            MediaState(
-                hasVideo = true, isPlaying = true, width = 1920, height = 1080,
-                positionMs = 5_000, durationMs = 60_000,
-            )
-        )
-        viewModel.enterMediaFullscreen()
-        compose.waitForIdle()
-
-        // Ten seconds back from five seconds in is the start, not a negative position.
-        viewModel.nudgeMedia(-10_000)
-        compose.waitForIdle()
-        assertTrue("a clamped seek must not throw or run negative", viewModel.isMediaFullscreen)
-    }
-
-    @Test
-    fun `a live stream with no rewind buffer refuses relative seeking`() {
-        render()
-        playing(widescreenLive)
-        viewModel.enterMediaFullscreen()
-        compose.waitForIdle()
-
-        // Nothing to seek through, so the gesture must be inert rather than pretending.
-        assertFalse(widescreenLive.isSeekable)
-        assertFalse(widescreenLive.hasLiveWindow)
-        viewModel.nudgeMedia(-10_000)
-        compose.waitForIdle()
-        assertTrue(viewModel.isMediaFullscreen)
-    }
-
-    @Test
-    fun `a live stream with a rewind buffer allows relative seeking inside it`() {
-        render()
-        val dvr = MediaState(
-            hasVideo = true, isPlaying = true, isLive = true, width = 1920, height = 1080,
-            positionMs = 300_000, seekableStartMs = 60_000, seekableEndMs = 360_000,
-        )
-        playing(dvr)
-        viewModel.enterMediaFullscreen()
-        compose.waitForIdle()
-
-        assertTrue(dvr.hasLiveWindow)
-        viewModel.nudgeMedia(-10_000)
-        compose.waitForIdle()
-        assertTrue(viewModel.isMediaFullscreen)
-    }
-
-    // ---- Scrub preview -------------------------------------------------------
-
-    @Test
-    fun `a source that cannot be sampled falls back to moving the video itself`() {
-        render()
-        playing(
-            MediaState(
-                hasVideo = true, isPlaying = true, width = 1920, height = 1080,
-                positionMs = 1_000, durationMs = 60_000,
-            )
-        )
-        viewModel.enterMediaFullscreen()
-        compose.waitForIdle()
-
-        // A cross-origin stream cannot be read back, so the playing video is scrubbed instead
-        // and is itself the preview. Scrubbing keeps working either way.
-        viewModel.beginScrub()
-        viewModel.onScrubPreviewMode(ScrubPreviewMode.IN_PLACE)
-        compose.waitForIdle()
-        assertEquals(ScrubPreviewMode.IN_PLACE, viewModel.scrubPreviewMode)
-
-        viewModel.scrubTo(30_000)
-        viewModel.endScrub()
-        compose.waitForIdle()
-        assertTrue(viewModel.isMediaFullscreen)
-    }
-
-    @Test
-    fun `preview capability is decided again for the next video`() {
-        render()
-        playing(MediaState(hasVideo = true, isPlaying = true, width = 1920, height = 1080, durationMs = 60_000))
-        viewModel.enterMediaFullscreen()
-        viewModel.onScrubPreviewMode(ScrubPreviewMode.FRAMES)
-        compose.waitForIdle()
-        assertEquals(ScrubPreviewMode.FRAMES, viewModel.scrubPreviewMode)
-
-        viewModel.exitMediaFullscreen()
-        compose.waitForIdle()
-        assertEquals(
-            "a different source may allow more, or less",
-            ScrubPreviewMode.NONE,
-            viewModel.scrubPreviewMode,
-        )
-    }
 
     private object SilentHost : BrowserHost {
         override fun onEnterElementFullscreen(view: View, callback: WebChromeClient.CustomViewCallback) = Unit

@@ -66,7 +66,6 @@ import com.slate.browser.Overlay
 import com.slate.browser.data.Suggestion
 import com.slate.browser.web.MediaFit
 import com.slate.browser.web.NavigationDirection
-import com.slate.browser.web.ScrubPreviewMode
 import com.slate.browser.ui.components.FindBar
 import com.slate.browser.ui.components.FullscreenHost
 import com.slate.browser.ui.components.LandscapeBar
@@ -317,12 +316,6 @@ fun BrowserScreen(
                 onSeek = viewModel::seekMedia,
                 onJumpToLive = viewModel::jumpToLiveEdge,
                 onVolume = viewModel::setMediaVolume,
-                scrubPreview = viewModel.scrubPreview,
-                scrubbingMovesVideo = viewModel.scrubPreviewMode == ScrubPreviewMode.IN_PLACE,
-                onScrubStart = viewModel::beginScrub,
-                onScrubTo = viewModel::scrubTo,
-                onScrubEnd = viewModel::endScrub,
-                onNudge = viewModel::nudgeMedia,
             )
         }
 
@@ -346,12 +339,6 @@ fun BrowserScreen(
                 onSeek = viewModel::seekMedia,
                 onJumpToLive = viewModel::jumpToLiveEdge,
                 onVolume = viewModel::setMediaVolume,
-                scrubPreview = null,
-                scrubbingMovesVideo = false,
-                onScrubStart = {},
-                onScrubTo = {},
-                onScrubEnd = {},
-                onNudge = viewModel::nudgeMedia,
             )
         }
 
@@ -456,6 +443,16 @@ private fun NavigationGestureAffordance(gesture: NavGesture, modifier: Modifier 
     }
 }
 
+/**
+ * What sits behind the omnibox while it is being edited.
+ *
+ * The dimming layer deliberately stops at the toolbar rather than covering the screen. It used
+ * to be laid over everything, which put a tap-to-dismiss listener on top of the address bar
+ * itself: the keyboard still worked, but every long-press, caret placement and selection drag
+ * was swallowed and read as "dismiss", so text could be typed and never selected, copied or
+ * pasted. The field has to be the topmost thing at its own coordinates for Android's own text
+ * selection to work at all.
+ */
 @Composable
 private fun OmniboxSheet(
     suggestions: List<Suggestion>,
@@ -468,31 +465,38 @@ private fun OmniboxSheet(
     Box(
         Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.32f))
-            // Tapping or flicking anywhere outside the editor puts it away, the way dismissing
-            // a keyboard-backed field is expected to work.
-            .pointerInput(Unit) { detectTapGestures { onDismiss() } }
-            .pointerInput(Unit) { detectVerticalDragGestures { _, _ -> onDismiss() } },
+            // The toolbar's own band is left out entirely, so nothing here is ever in front of
+            // the text field, the tab button or the menu button.
+            .padding(
+                top = if (landscape) chromeHeight else 0.dp,
+                bottom = if (landscape) 0.dp else bottomOccupied,
+            ),
     ) {
-        // No suggestions means no sheet at all, rather than an empty panel above the toolbar.
-        if (suggestions.isEmpty()) return@Box
-        Surface(
-            modifier = Modifier
-                .align(if (landscape) Alignment.TopCenter else Alignment.BottomCenter)
-                .fillMaxWidth()
-                // Only the horizontal insets here: the toolbar's own measured height already
-                // accounts for the edge it sits against, so applying that inset again would
-                // float the sheet a navigation bar's width away from the toolbar.
-                .windowInsetsPadding(systemChromeInsets().only(WindowInsetsSides.Horizontal))
-                .padding(
-                    top = if (landscape) chromeHeight else 0.dp,
-                    bottom = if (landscape) 0.dp else bottomOccupied,
-                )
-                .imePadding(),
-            color = MaterialTheme.colorScheme.surface,
-        ) {
-            Column(Modifier.verticalScroll(rememberScrollState())) {
-                SuggestionList(suggestions = suggestions, onPick = onPick)
+        // Tapping or flicking anywhere outside the editor puts it away, the way dismissing a
+        // keyboard-backed field is expected to work.
+        Box(
+            Modifier
+                .fillMaxSize()
+                .testTag(OMNIBOX_SCRIM_TAG)
+                .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.32f))
+                .pointerInput(Unit) { detectTapGestures { onDismiss() } }
+                .pointerInput(Unit) { detectVerticalDragGestures { _, _ -> onDismiss() } },
+        )
+
+        if (suggestions.isNotEmpty()) {
+            Surface(
+                modifier = Modifier
+                    .align(if (landscape) Alignment.TopCenter else Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    // Only the horizontal insets: the band this sheet sits in already stops
+                    // short of the toolbar, which carries the inset for the edge it is on.
+                    .windowInsetsPadding(systemChromeInsets().only(WindowInsetsSides.Horizontal))
+                    .imePadding(),
+                color = MaterialTheme.colorScheme.surface,
+            ) {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    SuggestionList(suggestions = suggestions, onPick = onPick)
+                }
             }
         }
     }
@@ -587,6 +591,9 @@ private val EXIT_DRAG_DISTANCE = 44.dp
 /** Test handles for the two regions whose relationship the layout is built around. */
 const val PAGE_TAG = "slate:page"
 const val CHROME_TAG = "slate:chrome"
+
+/** The dimming layer behind the omnibox editor; it must never reach the toolbar. */
+const val OMNIBOX_SCRIM_TAG = "slate:omnibox-scrim"
 
 @Composable
 private fun systemChromeInsets(): WindowInsets =

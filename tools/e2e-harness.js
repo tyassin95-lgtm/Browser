@@ -79,12 +79,10 @@ async function launch() {
   });
   const context = await browser.newContext();
 
-  const events = { reports: [], previews: [], modes: [], entered: [], hints: [] };
+  const events = { reports: [], entered: [], hints: [] };
   // The bridge Android injects with addJavascriptInterface, main frame only.
-  await context.exposeBinding('__slateBridge', (source, name, a, b) => {
+  await context.exposeBinding('__slateBridge', (source, name, a) => {
     if (name === 'report') events.reports.push(JSON.parse(a));
-    if (name === 'preview') events.previews.push({ data: a, t: b });
-    if (name === 'previewMode') events.modes.push(a);
     if (name === 'entered') events.entered.push(a);
     if (name === 'navigationHint') events.hints.push(a);
   });
@@ -92,8 +90,6 @@ async function launch() {
     if (window.top === window) {
       window.SlateMedia = {
         report: (j) => window.__slateBridge('report', j),
-        preview: (d, t) => window.__slateBridge('preview', d, t),
-        previewMode: (m) => window.__slateBridge('previewMode', m),
         entered: (ok) => window.__slateBridge('entered', ok),
         navigationHint: (s) => window.__slateBridge('navigationHint', s),
       };

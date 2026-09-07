@@ -82,7 +82,7 @@ class SettingsScreenTest {
         }
         viewModel = ViewModelProvider(viewModelStore, factory)[BrowserViewModel::class.java]
         viewModel.attach(app, SilentHost)
-        viewModel.bootstrap(null)
+        viewModel.bootstrapAndWait()
 
         compose.setContent {
             SlateTheme(themeMode = ThemeMode.LIGHT) {
