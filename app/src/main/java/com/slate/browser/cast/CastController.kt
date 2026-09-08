@@ -60,12 +60,11 @@ data class CastState(
 /**
  * Google Cast, and the browser's side of a session.
  *
- * Cast is the only casting stack on Android with first-party discovery, a maintained library
- * and a receiver on enough hardware to be worth the name — Chromecast, Android TV, Google TV
- * and the televisions and speakers with it built in. It is also the one Chrome itself uses on
- * this platform. DLNA would mean an unmaintained third-party stack and hand-rolled SSDP;
- * AirPlay is not open to Android apps at all; screen mirroring is a system feature that sends
- * the whole phone rather than the media, and the system already offers it.
+ * Cast is the better of the two protocols the browser speaks, with first-party discovery, a
+ * maintained library and a receiver on Chromecast, Android TV, Google TV and the televisions
+ * and speakers with it built in. It is also the one Chrome itself uses on this platform. It is
+ * not, however, on the sets Samsung and Amazon sell, which is why [DlnaController] exists
+ * beside it and [MediaReceivers] presents the two as one list.
  *
  * Everything here is guarded. Play Services can be missing, out of date or disabled, and on
  * those devices the browser simply never offers to cast rather than failing at the moment

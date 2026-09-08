@@ -27,7 +27,21 @@ class MediaReceivers(context: Context) {
     var state: CastState = CastState()
         private set
 
+    /**
+     * Told the current state the moment it is installed, not only on the next change.
+     *
+     * The state is seeded during construction — a phone with no Play Services can still search
+     * for DLNA renderers, and that is worth knowing before anything happens. A listener that
+     * arrives afterwards would otherwise sit on the default UNAVAILABLE for ever, because the
+     * next merge produces an identical state and is correctly suppressed as a no-op. That is
+     * exactly how the cast button disappears.
+     */
     var onStateChanged: (CastState) -> Unit = {}
+        set(value) {
+            field = value
+            value(state)
+        }
+
     var onHandBack: (positionMs: Long) -> Unit = {}
 
     init {
