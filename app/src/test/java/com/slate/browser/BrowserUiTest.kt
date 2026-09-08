@@ -518,7 +518,8 @@ class BrowserUiTest {
             externalUrls += url
             return true
         }
-        override fun toast(message: String) = Unit
+        override fun openCastSettings(): Boolean = false
+    override fun toast(message: String) = Unit
         override fun snack(message: String, actionLabel: String?, action: (() -> Unit)?) = Unit
     }
 }

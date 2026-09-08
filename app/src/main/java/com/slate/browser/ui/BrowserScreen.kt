@@ -366,6 +366,7 @@ fun BrowserScreen(
             CastPickerSheet(
                 devices = viewModel.castState.devices,
                 onPick = viewModel::connectCast,
+                onMirrorScreen = viewModel::mirrorScreen,
                 onDismiss = viewModel::closeCastPicker,
             )
         }

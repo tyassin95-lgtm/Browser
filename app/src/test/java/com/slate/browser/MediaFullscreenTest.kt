@@ -496,7 +496,8 @@ class MediaFullscreenTest {
         override fun requestSystemPermissions(permissions: Array<String>, onResult: (Boolean) -> Unit) = onResult(true)
         override fun openFileChooser(intent: Intent, callback: ValueCallback<Array<Uri>?>) = false
         override fun openExternally(url: String) = true
-        override fun toast(message: String) = Unit
+        override fun openCastSettings(): Boolean = false
+    override fun toast(message: String) = Unit
         override fun snack(message: String, actionLabel: String?, action: (() -> Unit)?) = Unit
     }
 }

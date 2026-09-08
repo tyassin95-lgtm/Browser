@@ -24,6 +24,15 @@ interface BrowserHost {
     /** Hands a non-web URL to whichever app can handle it. Returns false when nothing can. */
     fun openExternally(url: String): Boolean
 
+    /**
+     * Opens Android's own screen-casting settings.
+     *
+     * The way out for receivers no app-level protocol reaches — a Fire TV Stick speaks neither
+     * Google Cast nor DLNA, and mirroring is what it does support. The browser cannot start
+     * mirroring itself; handing the user to the system control is the supported way.
+     */
+    fun openCastSettings(): Boolean
+
     fun toast(message: String)
 
     fun snack(message: String, actionLabel: String? = null, action: (() -> Unit)? = null)

@@ -13,9 +13,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Cast
 import androidx.compose.material.icons.rounded.CastConnected
+import androidx.compose.material.icons.rounded.ScreenShare
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
@@ -38,6 +40,7 @@ import com.slate.browser.cast.CastDevice
 fun CastPickerSheet(
     devices: List<CastDevice>,
     onPick: (String) -> Unit,
+    onMirrorScreen: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -86,6 +89,40 @@ fun CastPickerSheet(
                         device.name,
                         style = MaterialTheme.typography.bodyLarge,
                         color = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
+            }
+            HorizontalDivider(Modifier.padding(vertical = 4.dp))
+            /*
+             * The way out for receivers no app-level protocol reaches. A Fire TV Stick speaks
+             * neither Google Cast nor DLNA — Amazon leaves both out — and mirroring is what it
+             * does support. The browser cannot start mirroring itself, so this hands the user
+             * to the system control that can, and says plainly that it is a different thing.
+             */
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable { onMirrorScreen() }
+                    .padding(horizontal = 24.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    Icons.Rounded.ScreenShare,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp),
+                )
+                Spacer(Modifier.width(20.dp))
+                Column {
+                    Text(
+                        "Mirror the screen instead",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        "For Fire TV, Samsung and anything else that isn't listed",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }

@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.view.View
 import android.view.WindowManager
 import android.webkit.ValueCallback
@@ -271,6 +272,17 @@ class MainActivity : ComponentActivity(), BrowserHost {
         } catch (_: SecurityException) {
             false
         }
+    }
+
+    override fun openCastSettings(): Boolean = try {
+        startActivity(
+            Intent(Settings.ACTION_CAST_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
+        true
+    } catch (_: ActivityNotFoundException) {
+        false
+    } catch (_: SecurityException) {
+        false
     }
 
     override fun toast(message: String) {

@@ -36,7 +36,7 @@ import com.slate.browser.tabs.TabManager
 import com.slate.browser.tabs.TabPersistence
 import com.slate.browser.util.ChromeScrollPolicy
 import com.slate.browser.util.UrlUtils
-import com.slate.browser.cast.CastController
+import com.slate.browser.cast.MediaReceivers
 import com.slate.browser.cast.CastEligibility
 import com.slate.browser.cast.CastPreflight
 import com.slate.browser.cast.CastStage
@@ -777,7 +777,7 @@ class BrowserViewModel @JvmOverloads constructor(
 
     // ---- Casting -----------------------------------------------------------
 
-    private var cast: CastController? = null
+    private var cast: MediaReceivers? = null
 
     var castState by mutableStateOf(CastState())
         private set
@@ -835,6 +835,19 @@ class BrowserViewModel @JvmOverloads constructor(
      * finished with.
      */
     private var castHandoffPending = false
+
+    /**
+     * Hands the user to Android's own screen-casting control.
+     *
+     * Mirroring is a different thing from casting a stream — the whole screen goes, and the
+     * phone keeps decoding it — but it is the only thing some receivers accept, and saying so
+     * is better than a picker that searches for ever.
+     */
+    fun mirrorScreen() {
+        castPickerOpen = false
+        updateCastDiscovery()
+        if (host?.openCastSettings() != true) snack("This phone has no screen-casting setting")
+    }
 
     fun connectCast(deviceId: String) {
         castPickerOpen = false
@@ -913,7 +926,7 @@ class BrowserViewModel @JvmOverloads constructor(
 
     private fun attachCast(context: Context) {
         if (cast != null) return
-        val controller = CastController(context.applicationContext)
+        val controller = MediaReceivers(context.applicationContext)
         controller.onStateChanged = { next ->
             val wasPlayingRemotely = castState.isPlayingRemotely
             castState = next
@@ -1578,6 +1591,7 @@ class BrowserViewModel @JvmOverloads constructor(
         override fun requestSystemPermissions(permissions: Array<String>, onResult: (Boolean) -> Unit) = onResult(false)
         override fun openFileChooser(intent: android.content.Intent, callback: android.webkit.ValueCallback<Array<android.net.Uri>?>) = false
         override fun openExternally(url: String) = false
+        override fun openCastSettings(): Boolean = false
         override fun toast(message: String) = Unit
         override fun snack(message: String, actionLabel: String?, action: (() -> Unit)?) = Unit
     }

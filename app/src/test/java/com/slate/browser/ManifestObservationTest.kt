@@ -126,7 +126,8 @@ class ManifestObservationTest {
         override fun requestSystemPermissions(permissions: Array<String>, callback: (Boolean) -> Unit) = callback(false)
         override fun openFileChooser(intent: android.content.Intent, callback: android.webkit.ValueCallback<Array<Uri>?>): Boolean = false
         override fun openExternally(url: String): Boolean = false
-        override fun toast(message: String) = Unit
+        override fun openCastSettings(): Boolean = false
+    override fun toast(message: String) = Unit
         override fun snack(message: String, actionLabel: String?, action: (() -> Unit)?) = Unit
     }
 

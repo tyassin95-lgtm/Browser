@@ -269,12 +269,32 @@ so canvas-rendered players show a picture too. A watchdog re-asserts all of it a
 that rewrite their own layout.
 
 **Casting.** Whatever is playing can be sent to a nearby receiver from the same media controls
-that drive it on the phone. Google Cast is the mechanism — Chromecast, Android TV, Google TV
-and the televisions and speakers with it built in — because it is the only casting stack on
-Android with first-party discovery, a maintained library and a receiver on enough hardware to
-be worth the name. It is also the one Chrome uses on this platform. DLNA would mean an
-unmaintained third-party stack and hand-rolled SSDP; AirPlay is not open to Android apps;
-screen mirroring sends the whole phone rather than the media, and the system already offers it.
+that drive it on the phone. Two protocols are spoken, because no single one reaches the
+televisions people actually own.
+
+Google Cast is the first — Chromecast, Android TV, Google TV and the sets and speakers with it
+built in. It is the stack Chrome uses on this platform: first-party discovery, a maintained
+library, and a receiver that plays HLS and DASH without being told how.
+
+UPnP AV, better known as DLNA, is the second, and it exists because Google Cast does not. A
+Samsung or LG television has no Cast receiver — those vendors ship their own — so a picker that
+only speaks Cast searches for ever in most living rooms. DLNA is a published standard rather
+than a custom protocol: an SSDP `M-SEARCH` on 239.255.255.250:1900 under a multicast lock, the
+device description fetched and parsed for an `AVTransport` service, then SOAP —
+`SetAVTransportURI`, `Play`, `Pause`, `Seek`, `SetVolume`, `GetPositionInfo`. Every response is
+read with a hard byte cap and treated as hostile input like any other network reply. A
+third-party UPnP stack was tried first and could not be resolved from any published repository;
+the wire format is small enough that speaking it directly is the smaller risk.
+
+AirPlay is not open to Android apps, and a Fire TV Stick implements neither Cast nor DLNA as a
+receiver. For those, the picker offers screen mirroring — the system's own Wi-Fi Display
+hand-off, one row at the bottom that opens the platform's cast settings. It sends the whole
+phone rather than the media, so it is offered as the fallback it is rather than dressed up as
+casting.
+
+Both protocols feed one picker. Devices are pooled and de-duplicated, whichever stack found
+them; the session belongs to whichever one is connected; and if a protocol is unavailable on
+the device the other simply carries the list.
 
 The transport does not change. While a receiver has the media, its position, duration and
 playback state are merged over the page's report and the same buttons drive the receiver
@@ -314,7 +334,7 @@ the fullscreen player. Both lead to the same picker. Discovery runs quietly whil
 something castable on the page and scans actively while the picker is open — but the control
 does not wait for a device to be found before appearing, because a control that only shows up
 after the scan it is supposed to start is a control nobody finds. An empty picker saying it is
-looking is a better answer than no button.
+looking, with the mirroring row underneath it, is a better answer than no button.
 
 **Media controls.** Play and pause, a scrub bar with position and duration, and volume. The
 elapsed time follows the thumb while a drag is in progress and the stream the rest of the time,
