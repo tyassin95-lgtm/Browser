@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import com.slate.browser.cast.dlna.DlnaClient
+import com.slate.browser.cast.dlna.SoapResult
 import com.slate.browser.cast.dlna.UpnpParsing
 import com.slate.browser.cast.dlna.UpnpRenderer
 import java.util.concurrent.Executors
@@ -118,22 +119,31 @@ class DlnaController(context: Context) {
     fun load(castable: CastVerdict.Castable, startAtMs: Long) {
         val renderer = connected ?: return
         loaded = castable
+        // A DLNA renderer is a file player, not a streaming client: it is given the plain file
+        // if the page gave the browser one, and only falls back to a manifest when that is the
+        // only address in existence.
+        val source = castable.forFilePlayer
         update { it.copy(stage = CastStage.LOADING, message = "", isLive = castable.isLive) }
         background.execute {
-            val metadata = UpnpParsing.didl(castable.title, castable.url, castable.contentType)
-            val set = client.invoke(
+            val metadata = UpnpParsing.didl(
+                title = castable.title,
+                url = source.url,
+                contentType = source.contentType,
+                isLive = castable.isLive,
+            )
+            val set = client.call(
                 renderer.avTransportUrl,
                 DlnaClient.AV_TRANSPORT,
                 "SetAVTransportURI",
                 "<InstanceID>0</InstanceID>" +
-                    "<CurrentURI>${UpnpParsing.escape(castable.url)}</CurrentURI>" +
+                    "<CurrentURI>${UpnpParsing.escape(source.url)}</CurrentURI>" +
                     "<CurrentURIMetaData>${UpnpParsing.escape(metadata)}</CurrentURIMetaData>",
             )
-            if (set == null) {
+            if (set !is SoapResult.Ok) {
                 update {
                     it.copy(
                         stage = CastStage.FAILED,
-                        message = "${renderer.name} wouldn't accept this video.",
+                        message = refusalMessage(renderer.name, source, set),
                     )
                 }
                 return@execute
@@ -157,6 +167,33 @@ class DlnaController(context: Context) {
             }
             update { it.copy(stage = CastStage.PLAYING) }
             startPolling()
+        }
+    }
+
+    /**
+     * Why the television said no, in words that suggest what to do instead.
+     *
+     * The common case is not a bug and never will be: a DLNA renderer was designed to play
+     * files off a NAS, and most televisions reject an adaptive manifest outright — which is
+     * what almost every video site serves. Saying that, and pointing at the mirroring that does
+     * work, is worth more than a number nobody can act on. The number is still included, because
+     * when it is one of the unusual ones it is the only thing that identifies the problem.
+     */
+    internal fun refusalMessage(deviceName: String, source: CastSource, result: SoapResult): String {
+        if (result is SoapResult.Unreachable) {
+            return "$deviceName stopped answering."
+        }
+        val fault = (result as? SoapResult.Refused)?.fault
+        if (source.format != StreamFormat.PROGRESSIVE) {
+            return "$deviceName can't play this kind of stream — DLNA televisions play video " +
+                "files, not the adaptive streams most sites use. Screen mirroring will show it."
+        }
+        return when (fault?.code) {
+            ILLEGAL_MIME -> "$deviceName doesn't support this video's format."
+            RESOURCE_NOT_FOUND -> "$deviceName couldn't fetch this video."
+            TRANSITION_NOT_AVAILABLE -> "$deviceName is busy with something else."
+            null -> "$deviceName wouldn't accept this video."
+            else -> "$deviceName wouldn't accept this video (error ${fault.code})."
         }
     }
 
@@ -267,5 +304,10 @@ class DlnaController(context: Context) {
     companion object {
         const val DLNA_PREFIX = "dlna:"
         private const val POLL_INTERVAL_MS = 1_000L
+
+        // UPnP AV error codes, as the AVTransport service defines them.
+        private const val TRANSITION_NOT_AVAILABLE = 701
+        private const val ILLEGAL_MIME = 714
+        private const val RESOURCE_NOT_FOUND = 716
     }
 }

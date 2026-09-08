@@ -522,4 +522,17 @@ class BrowserUiTest {
     override fun toast(message: String) = Unit
         override fun snack(message: String, actionLabel: String?, action: (() -> Unit)?) = Unit
     }
+
+    @Test
+    fun `a page that cannot be cast still opens the picker, because mirroring is in it`() {
+        // The refusal used to be a message that dismissed itself, which closed the only door to
+        // the thing that does work on a television with no Cast receiver.
+        viewModel.openCastPicker()
+        pump()
+        assertTrue("the picker must open", viewModel.castPickerOpen)
+        assertTrue(
+            "the reason must be shown inside it: ${viewModel.castNote}",
+            viewModel.castNote.isNotBlank(),
+        )
+    }
 }

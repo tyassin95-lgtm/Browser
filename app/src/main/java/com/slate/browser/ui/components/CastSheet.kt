@@ -34,25 +34,41 @@ import com.slate.browser.cast.CastDevice
  * Deliberately just a list. The device names come from the receivers themselves, so there is
  * nothing to add to them, and a browser that stops to explain casting every time is a browser
  * that has stopped being minimal.
+ *
+ * The exception is [note]: when this page's media cannot be sent to any receiver, the sheet
+ * still opens, says why in one line, and offers mirroring — because mirroring is the answer to
+ * that sentence, and a message that closes the only door to it is not a helpful message.
+ * Devices are hidden in that case rather than listed and then refused on tap.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CastPickerSheet(
     devices: List<CastDevice>,
+    note: String,
     onPick: (String) -> Unit,
     onMirrorScreen: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    // Nothing here can be sent, so a device to send it to is not a choice worth offering.
+    val listed = if (note.isEmpty()) devices else emptyList()
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
         Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(bottom = 8.dp)) {
             Text(
-                "Cast to",
+                if (note.isEmpty()) "Cast to" else "Can't cast this page",
                 style = MaterialTheme.typography.titleSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
             )
-            if (devices.isEmpty()) {
+            if (note.isNotEmpty()) {
+                Text(
+                    note,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp),
+                )
+            }
+            if (note.isEmpty() && listed.isEmpty()) {
                 Row(
                     Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 14.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -66,7 +82,7 @@ fun CastPickerSheet(
                     )
                 }
             }
-            devices.forEach { device ->
+            listed.forEach { device ->
                 Row(
                     Modifier
                         .fillMaxWidth()

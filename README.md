@@ -315,11 +315,30 @@ quality, while a live player re-requests its variant for ever. It is recorded *a
 blocking decision, so a pre-roll's own playlist — often the first a page asks for — can never
 be what appears on somebody's television.
 
+**One page, two different addresses.** The receivers do not want the same thing. A Cast receiver
+plays HLS and DASH natively and should be given the manifest, because that is where every
+quality lives. A DLNA television is a *file player* — those sets were built to show a video off a
+NAS — and most of them refuse an adaptive manifest outright, which is the single most common way
+casting fails in a living room. So the browser also remembers the first plain media file a
+document fetches, and hands that to a file player instead. Segments are the trap there: an
+adaptive stream's pieces are media files too, and four seconds of video on a television is worse
+than an honest refusal. Two things separate them — a file seen *after* a manifest belongs to that
+manifest, and segments are named like segments — and both are applied before anything is kept.
+
+When a renderer still says no, it says so in a number the specification defines, and that number
+is the difference between "the television is not on the network" and "this television cannot play
+this kind of stream". It is read and turned into a sentence with somewhere to go: an adaptive
+stream refused by a file player explains what DLNA televisions do and points at mirroring; a
+plain file refused by one is about the format instead. The metadata sent with the address carries
+real DLNA flags rather than a bare asterisk — several televisions refuse rather than guess.
+
 What is left is what genuinely cannot be sent, and the interesting work is saying so. Protected
 content is decrypted by the phone as it plays and the licence belongs to the site rather than
 the browser; an address only this device can resolve is not an address; a page that assembles a
 stream and fetches no playlist has nothing to hand over. Each is refused with the actual
-reason. What survives is then *asked the question the receiver will ask*: one anonymous ranged
+reason, and the refusal opens the picker rather than closing it: every one of those sentences
+ends at screen mirroring, and a message that dismisses itself is a message that shuts the only
+working door. What survives is then *asked the question the receiver will ask*: one anonymous ranged
 request from this device, no cookies, short timeout. A stream that plays here because the user
 is signed in answers a stranger with a 403, or — more often, and more quietly — with a sign-in
 page carrying a perfectly successful status code. Both become a sentence before a session is

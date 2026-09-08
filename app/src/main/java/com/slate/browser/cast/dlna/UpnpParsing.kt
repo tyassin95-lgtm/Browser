@@ -14,6 +14,9 @@ data class UpnpRenderer(
     val renderingControlUrl: String?,
 )
 
+/** A renderer's refusal, in the numbers the specification defines. */
+data class UpnpFault(val code: Int, val description: String)
+
 /**
  * The parts of UPnP AV this browser speaks.
  *
@@ -120,6 +123,19 @@ object UpnpParsing {
         return unescape(xml.substring(start, close.range.first))
     }
 
+    /**
+     * The UPnP error inside a SOAP fault, if the reply is one.
+     *
+     * A renderer that refuses says why in a number defined by the specification, and that
+     * number is the difference between "the television is not on the network" and "this
+     * television cannot play this kind of stream". Throwing it away and saying "it wouldn't
+     * accept this video" wastes the only diagnosis anyone gets.
+     */
+    fun faultOf(xml: String): UpnpFault? {
+        val code = soapValue(xml, "errorCode")?.trim()?.toIntOrNull() ?: return null
+        return UpnpFault(code, soapValue(xml, "errorDescription")?.trim().orEmpty())
+    }
+
     /** `H:MM:SS` or `HH:MM:SS.mmm`, as position and duration both arrive. */
     fun parseClock(value: String?): Long {
         val text = value?.trim().orEmpty()
@@ -145,21 +161,35 @@ object UpnpParsing {
      * Many devices refuse a URL with no DIDL-Lite at all, and many more decide how to treat the
      * stream from the protocolInfo rather than from the address — so this is not decoration.
      */
-    fun didl(title: String, url: String, contentType: String): String {
+    fun didl(title: String, url: String, contentType: String, isLive: Boolean = false): String {
         val objectClass = if (contentType.startsWith("audio/")) {
             "object.item.audioItem.musicTrack"
         } else {
             "object.item.videoItem"
         }
+        // The DLNA flags matter more than they look. A renderer reads them to decide whether it
+        // may seek (OP=01 for a file it can range-request, 00 for a live stream), and whether
+        // the source is streaming or a background transfer. Several televisions refuse outright
+        // rather than guess when the fourth field is a bare "*".
+        val operations = if (isLive) "00" else "01"
+        val flags = if (isLive) LIVE_FLAGS else SEEKABLE_FLAGS
+        val protocolInfo =
+            "http-get:*:$contentType:DLNA.ORG_OP=$operations;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=$flags"
         return """<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" """ +
             """xmlns:dc="http://purl.org/dc/elements/1.1/" """ +
             """xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">""" +
             """<item id="0" parentID="-1" restricted="1">""" +
             """<dc:title>${escape(title)}</dc:title>""" +
             """<upnp:class>$objectClass</upnp:class>""" +
-            """<res protocolInfo="http-get:*:${escape(contentType)}:*">${escape(url)}</res>""" +
+            """<res protocolInfo="${escape(protocolInfo)}">${escape(url)}</res>""" +
             """</item></DIDL-Lite>"""
     }
+
+    /** Streaming, seekable by byte range, background-transfer allowed. */
+    private const val SEEKABLE_FLAGS = "01700000000000000000000000000000"
+
+    /** Streaming, no seeking: what a live stream honestly is. */
+    private const val LIVE_FLAGS = "01500000000000000000000000000000"
 
     fun escape(value: String): String = value
         .replace("&", "&amp;")

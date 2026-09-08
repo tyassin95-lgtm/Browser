@@ -5,6 +5,9 @@ import com.slate.browser.web.DownloadNaming
 import com.slate.browser.web.MediaState
 import com.slate.browser.web.UrlSafety
 
+/** One address a receiver could be given, and what to tell it it is fetching. */
+data class CastSource(val url: String, val format: StreamFormat, val contentType: String)
+
 /** What kind of stream a receiver would be asked to play, which decides how it is described to it. */
 enum class StreamFormat(val contentType: String) {
     HLS("application/x-mpegurl"),
@@ -24,7 +27,15 @@ enum class StreamFormat(val contentType: String) {
  */
 sealed interface CastVerdict {
 
-    /** The receiver can be asked for this. */
+    /**
+     * The receiver can be asked for this.
+     *
+     * Two receivers are not asked for the same thing. A Cast receiver plays HLS and DASH
+     * natively and should be given the manifest, because that is where every quality lives. A
+     * DLNA renderer is a file player — the televisions that speak it were built to show a video
+     * off a NAS, and most of them reject an adaptive manifest outright — so it is given a plain
+     * file when the page fetched one.
+     */
     data class Castable(
         val url: String,
         val format: StreamFormat,
@@ -32,7 +43,16 @@ sealed interface CastVerdict {
         val isLive: Boolean,
         val title: String,
         val posterUrl: String,
-    ) : CastVerdict
+        /** A plain media file the page also fetched, if there was one. */
+        val plainFile: CastSource? = null,
+    ) : CastVerdict {
+
+        /** What a receiver that understands adaptive streaming gets: the manifest. */
+        val forAdaptiveReceiver: CastSource get() = CastSource(url, format, contentType)
+
+        /** What a file player gets: a plain file if one exists, otherwise the only address there is. */
+        val forFilePlayer: CastSource get() = plainFile ?: forAdaptiveReceiver
+    }
 
     /** It cannot be sent, and this is what to tell the user. */
     data class Refused(val reason: String) : CastVerdict
@@ -54,13 +74,15 @@ object CastEligibility {
         media: MediaState,
         pageUrl: String,
         observedManifest: String? = null,
+        observedMediaFile: String? = null,
     ): CastVerdict {
         if (!media.hasMedia) return CastVerdict.NothingPlaying
 
         // Protection is about the content, not about where it lives, so no address helps.
         if (media.isProtected) {
             return CastVerdict.Refused(
-                "This video is copy-protected, so it can only play on this phone.",
+                "This video is copy-protected, so it can only play on this phone. " +
+                    "Screen mirroring will show it.",
             )
         }
 
@@ -72,9 +94,11 @@ object CastEligibility {
             return CastVerdict.Refused(
                 if (media.isStreamedInPage) {
                     "This site builds the video inside the page, so there is no address a TV " +
-                        "can open. Starting playback first sometimes gives the browser one."
+                        "can open. Starting playback usually gives the browser one; screen " +
+                        "mirroring always works."
                 } else {
-                    "The browser can't tell where this video is coming from."
+                    "The browser can't tell where this video is coming from. Screen mirroring " +
+                        "will show it."
                 },
             )
         }
@@ -87,7 +111,9 @@ object CastEligibility {
             return CastVerdict.Refused("This video isn't at an address a TV can open.")
         }
         if (isPhoneOnly(host)) {
-            return CastVerdict.Refused("This video is only reachable from this phone.")
+            return CastVerdict.Refused(
+                "This video is only reachable from this phone. Screen mirroring will show it.",
+            )
         }
 
         val format = formatOf(url)
@@ -98,6 +124,32 @@ object CastEligibility {
             isLive = media.isLive,
             title = media.pageTitle.ifBlank { host },
             posterUrl = media.posterUrl.takeIf { UrlSafety.isWeb(it) }.orEmpty(),
+            plainFile = plainFile(url, format, observedMediaFile, media.audioOnly),
+        )
+    }
+
+    /**
+     * A plain file for the receivers that cannot play a manifest.
+     *
+     * If the address already is one, there is nothing to choose. Otherwise it is whatever plain
+     * media file the page was seen fetching — which for a page that streams through a
+     * MediaSource is often a whole progressive copy of the same video, and is exactly what a
+     * DLNA television is able to play.
+     */
+    private fun plainFile(
+        url: String,
+        format: StreamFormat,
+        observedMediaFile: String?,
+        audioOnly: Boolean,
+    ): CastSource? {
+        if (format == StreamFormat.PROGRESSIVE) return null
+        val file = observedMediaFile?.trim().orEmpty()
+        if (file.isEmpty() || !UrlSafety.isWeb(file)) return null
+        if (file == url) return null
+        return CastSource(
+            url = file,
+            format = StreamFormat.PROGRESSIVE,
+            contentType = contentTypeFor(file, StreamFormat.PROGRESSIVE, audioOnly),
         )
     }
 

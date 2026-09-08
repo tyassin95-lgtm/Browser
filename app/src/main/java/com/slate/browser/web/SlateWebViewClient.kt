@@ -157,13 +157,23 @@ class SlateWebViewClient(
     private fun noteMediaManifest(request: WebResourceRequest) {
         if (tab.observedManifest != null) return
         val url = runCatching { request.url.toString() }.getOrNull() ?: return
-        if (MediaManifests.isManifest(url)) tab.observedManifest = url
+        if (MediaManifests.isManifest(url)) {
+            tab.observedManifest = url
+            return
+        }
+        // A plain file, kept for a receiver that only plays files. Only before a manifest is
+        // seen: what a page fetches afterwards are that manifest's segments, and four seconds
+        // of video on a television is worse than an honest refusal.
+        if (tab.observedMediaFile == null && MediaManifests.isPlainMediaFile(url)) {
+            tab.observedMediaFile = url
+        }
     }
 
     override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
         documentUrl = url
         // A new document is a new stream; the last page's playlist is not this page's.
         tab.observedManifest = null
+        tab.observedMediaFile = null
         pendingMainFrame = null
         pendingHttpStatus = null
         pageStarted(tab, url)
@@ -198,6 +208,7 @@ class SlateWebViewClient(
         // Single-page apps navigate without a page load; keep the omnibox honest.
         documentUrl = url
         tab.observedManifest = null
+        tab.observedMediaFile = null
         tab.url = url
         tab.canGoBack = view.canGoBack()
         tab.canGoForward = view.canGoForward()

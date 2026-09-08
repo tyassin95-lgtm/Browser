@@ -5,6 +5,7 @@ import com.slate.browser.cast.CastVerdict
 import com.slate.browser.cast.StreamFormat
 import com.slate.browser.web.MediaState
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -39,8 +40,19 @@ class CastEligibilityTest {
         pageTitle = "A page",
     )
 
-    private fun evaluate(state: MediaState, observedManifest: String? = null) =
-        CastEligibility.evaluate(state, "https://example.com/watch", observedManifest)
+    /** A page that streams through a MediaSource, which is nearly every video site now. */
+    private fun mse() = video(src = "blob:https://example.com/9a7c-…", mse = true)
+
+    private fun evaluate(
+        state: MediaState,
+        observedManifest: String? = null,
+        observedMediaFile: String? = null,
+    ) = CastEligibility.evaluate(
+        state,
+        "https://example.com/watch",
+        observedManifest,
+        observedMediaFile,
+    )
 
     @Test
     fun `an ordinary progressive video is castable`() {
@@ -176,5 +188,46 @@ class CastEligibilityTest {
     fun `a page with no title still gives the receiver something to show`() {
         val untitled = video().copy(pageTitle = "")
         assertEquals("cdn.example.com", (evaluate(untitled) as CastVerdict.Castable).title)
+    }
+
+    @Test
+    fun `a file player is given the file, and a Cast receiver the playlist`() {
+        // The two receivers are not asked for the same address. A Cast receiver plays HLS and
+        // gets every quality from the manifest; a DLNA television is a file player and would
+        // refuse that manifest outright.
+        val verdict = evaluate(
+            mse(),
+            observedManifest = "https://cdn.example.com/live/master.m3u8",
+            observedMediaFile = "https://cdn.example.com/videos/talk.mp4",
+        ) as CastVerdict.Castable
+
+        assertEquals("https://cdn.example.com/live/master.m3u8", verdict.forAdaptiveReceiver.url)
+        assertEquals(StreamFormat.HLS, verdict.forAdaptiveReceiver.format)
+        assertEquals("https://cdn.example.com/videos/talk.mp4", verdict.forFilePlayer.url)
+        assertEquals("video/mp4", verdict.forFilePlayer.contentType)
+    }
+
+    @Test
+    fun `with no plain file, a file player gets the only address there is`() {
+        // Better to let the television refuse it and say why than to refuse on its behalf.
+        val verdict = evaluate(
+            mse(),
+            observedManifest = "https://cdn.example.com/live/master.m3u8",
+        ) as CastVerdict.Castable
+        assertEquals(verdict.forAdaptiveReceiver, verdict.forFilePlayer)
+    }
+
+    @Test
+    fun `an address that is already a file needs no alternative`() {
+        val verdict = evaluate(video(src = "https://cdn.example.com/movie.mp4")) as CastVerdict.Castable
+        assertNull(verdict.plainFile)
+        assertEquals("https://cdn.example.com/movie.mp4", verdict.forFilePlayer.url)
+    }
+
+    @Test
+    fun `a refusal points at the thing that does work`() {
+        // Every one of these sentences has the same answer, and it is worth saying.
+        val refused = evaluate(mse()) as CastVerdict.Refused
+        assertTrue(refused.reason, refused.reason.contains("mirroring"))
     }
 }

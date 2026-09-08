@@ -150,4 +150,40 @@ class UpnpParsingTest {
                 .contains("object.item.audioItem.musicTrack"),
         )
     }
+
+    @Test
+    fun `a fault is read as the number the specification defines`() {
+        val fault = UpnpParsing.faultOf(
+            """<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">""" +
+                """<s:Body><s:Fault><detail><UPnPError xmlns="urn:schemas-upnp-org:control-1-0">""" +
+                """<errorCode>714</errorCode><errorDescription>Illegal MIME-type</errorDescription>""" +
+                """</UPnPError></detail></s:Fault></s:Body></s:Envelope>""",
+        )
+        assertEquals(714, fault?.code)
+        assertEquals("Illegal MIME-type", fault?.description)
+    }
+
+    @Test
+    fun `an ordinary reply is not a fault`() {
+        assertNull(UpnpParsing.faultOf("<Envelope><Body><PlayResponse/></Body></Envelope>"))
+    }
+
+    @Test
+    fun `the metadata tells the renderer whether it may seek`() {
+        // Televisions read the DLNA flags rather than the address to decide what they are
+        // being given, and several refuse outright when the field is a bare asterisk.
+        val film = UpnpParsing.didl("A film", "http://cdn.test/movie.mp4", "video/mp4")
+        assertTrue(film, film.contains("DLNA.ORG_OP=01"))
+        assertTrue(film, film.contains("http-get:*:video/mp4:"))
+        assertTrue(film, film.contains("object.item.videoItem"))
+
+        val live = UpnpParsing.didl("A stream", "http://cdn.test/live.m3u8", "video/mp4", isLive = true)
+        assertTrue(live, live.contains("DLNA.ORG_OP=00"))
+    }
+
+    @Test
+    fun `an audio track is described as one`() {
+        val track = UpnpParsing.didl("A song", "http://cdn.test/song.mp3", "audio/mpeg")
+        assertTrue(track, track.contains("object.item.audioItem.musicTrack"))
+    }
 }

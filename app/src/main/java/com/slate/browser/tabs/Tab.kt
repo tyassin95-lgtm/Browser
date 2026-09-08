@@ -87,6 +87,15 @@ class Tab(
     @Volatile
     internal var observedManifest: String? = null
 
+    /**
+     * The first plain media file this document asked for, for the receivers that cannot play a
+     * manifest at all — a DLNA television is a file player, and handing it a playlist gets a
+     * flat refusal. Recorded only until a manifest appears, because everything a page fetches
+     * after one is a segment of it rather than a video in its own right.
+     */
+    @Volatile
+    internal var observedMediaFile: String? = null
+
     /** How many requests this page had refused, reset on every navigation. */
     var blockedCount by mutableIntStateOf(0)
         internal set

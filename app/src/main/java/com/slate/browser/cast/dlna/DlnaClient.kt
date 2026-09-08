@@ -21,6 +21,13 @@ import java.net.URL
  * Every response here comes from an unauthenticated device on the local network, so all of it
  * is bounded and parsed defensively.
  */
+/** What came back from a renderer: the reply, the refusal, or nothing at all. */
+sealed interface SoapResult {
+    data class Ok(val body: String) : SoapResult
+    data class Refused(val fault: UpnpFault) : SoapResult
+    data object Unreachable : SoapResult
+}
+
 class DlnaClient(context: Context) {
 
     private val wifi = runCatching {
@@ -107,6 +114,16 @@ class DlnaClient(context: Context) {
      * an action is reported to the caller rather than retried at it.
      */
     fun invoke(controlUrl: String, service: String, action: String, arguments: String): String? =
+        (call(controlUrl, service, action, arguments) as? SoapResult.Ok)?.body
+
+    /**
+     * One SOAP action, with the renderer's answer kept intact.
+     *
+     * A refusal is not the same as silence, and the two are not the same as a fault the
+     * specification has a number for. Everything above this needs to tell them apart to say
+     * anything useful, so nothing is flattened into null here.
+     */
+    fun call(controlUrl: String, service: String, action: String, arguments: String): SoapResult =
         runCatching {
             val body =
                 """<?xml version="1.0" encoding="utf-8"?>""" +
@@ -129,11 +146,16 @@ class DlnaClient(context: Context) {
                 val status = connection.responseCode
                 val stream = if (status in 200..299) connection.inputStream else connection.errorStream
                 val reply = stream?.readBounded(MAX_REPLY_BYTES).orEmpty()
-                if (status in 200..299) reply else null
+                when {
+                    status in 200..299 -> SoapResult.Ok(reply)
+                    else -> SoapResult.Refused(
+                        UpnpParsing.faultOf(reply) ?: UpnpFault(status, "HTTP $status"),
+                    )
+                }
             } finally {
                 connection.disconnect()
             }
-        }.getOrNull()
+        }.getOrDefault(SoapResult.Unreachable)
 
     /** Reads at most [limit] bytes: a device on the network does not get to exhaust memory. */
     private fun java.io.InputStream.readBounded(limit: Int): String {

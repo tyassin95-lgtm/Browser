@@ -806,18 +806,27 @@ class BrowserViewModel @JvmOverloads constructor(
         media = media,
         pageUrl = activeTab?.url.orEmpty(),
         observedManifest = activeTab?.observedManifest,
+        observedMediaFile = activeTab?.observedMediaFile,
     )
+
+    /**
+     * Why this page's media cannot be sent anywhere, or empty when it can.
+     *
+     * Shown inside the picker rather than as a message that dismisses itself, because the
+     * answer to every one of these sentences is the mirroring row underneath it.
+     */
+    var castNote by mutableStateOf("")
+        private set
 
     fun openCastPicker() {
         val controller = cast ?: return
-        when (val verdict = castVerdict()) {
-            is CastVerdict.NothingPlaying -> snack("Nothing is playing to cast")
-            is CastVerdict.Refused -> snack(verdict.reason)
-            is CastVerdict.Castable -> {
-                castPickerOpen = true
-                controller.startDiscovery(active = true)
-            }
+        castNote = when (val verdict = castVerdict()) {
+            is CastVerdict.NothingPlaying -> "Nothing is playing to cast."
+            is CastVerdict.Refused -> verdict.reason
+            is CastVerdict.Castable -> ""
         }
+        castPickerOpen = true
+        controller.startDiscovery(active = true)
     }
 
     fun closeCastPicker() {
@@ -876,11 +885,15 @@ class BrowserViewModel @JvmOverloads constructor(
             return
         }
         val startAt = media.positionMs
+        // The address that will actually be sent, which is not the same for both receivers: a
+        // Cast receiver gets the manifest, a DLNA television gets a plain file.
+        val source =
+            if (controller.prefersPlainFile) verdict.forFilePlayer else verdict.forAdaptiveReceiver
         viewModelScope.launch {
             val reachable = withContext(Dispatchers.IO) {
                 CastPreflight.check(
-                    verdict.url,
-                    rangedRequest = verdict.format == StreamFormat.PROGRESSIVE,
+                    source.url,
+                    rangedRequest = source.format == StreamFormat.PROGRESSIVE,
                 )
             }
             val refusal = when (reachable) {

@@ -120,6 +120,29 @@ class ManifestObservationTest {
         assertNull("the last page's playlist is not this page's", tab.observedManifest)
     }
 
+    @Test
+    fun `a plain file is kept for the receivers that cannot play a playlist`() {
+        fetch("https://cdn.example.com/player.js")
+        fetch("https://cdn.example.com/videos/talk.mp4")
+        assertEquals("https://cdn.example.com/videos/talk.mp4", tab.observedMediaFile)
+    }
+
+    @Test
+    fun `once a playlist is seen, the files after it are its segments`() {
+        // Everything a page fetches after a manifest belongs to that manifest. Offering one of
+        // those to a television would put four seconds of video on it.
+        fetch("https://cdn.example.com/live/master.m3u8")
+        fetch("https://cdn.example.com/live/hd/piece.mp4")
+        assertNull(tab.observedMediaFile)
+    }
+
+    @Test
+    fun `a new document forgets the last page's file too`() {
+        fetch("https://cdn.example.com/videos/talk.mp4")
+        client.onPageStarted(FakeWebView.of(), "https://example.com/another", null)
+        assertNull(tab.observedMediaFile)
+    }
+
     private object SilentHost : BrowserHost {
         override fun onEnterElementFullscreen(view: android.view.View, callback: android.webkit.WebChromeClient.CustomViewCallback) = Unit
         override fun onExitElementFullscreen() = Unit

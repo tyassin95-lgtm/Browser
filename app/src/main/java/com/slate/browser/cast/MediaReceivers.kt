@@ -93,6 +93,14 @@ class MediaReceivers(context: Context) {
         onStateChanged(next)
     }
 
+    /**
+     * Whether the connected receiver is a file player rather than a streaming client.
+     *
+     * A DLNA television plays files; a Cast receiver plays manifests. The two are not asked for
+     * the same address, and whatever checks that address beforehand has to check the right one.
+     */
+    val prefersPlainFile: Boolean get() = active == Owner.DLNA
+
     fun startDiscovery(active: Boolean) {
         cast.startDiscovery(active)
         dlna.startDiscovery(active)

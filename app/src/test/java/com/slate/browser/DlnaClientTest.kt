@@ -2,6 +2,7 @@ package com.slate.browser
 
 import androidx.test.core.app.ApplicationProvider
 import com.slate.browser.cast.dlna.DlnaClient
+import com.slate.browser.cast.dlna.SoapResult
 import com.slate.browser.cast.dlna.UpnpParsing
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -159,5 +160,38 @@ class DlnaClientTest {
         )
         assertEquals(90_000L, UpnpParsing.parseClock(UpnpParsing.soapValue(reply.orEmpty(), "RelTime")))
         assertEquals(2_700_000L, UpnpParsing.parseClock(UpnpParsing.soapValue(reply.orEmpty(), "TrackDuration")))
+    }
+
+    @Test
+    fun `a refusal keeps the reason the renderer gave`() {
+        // 714 is "Illegal MIME-type": the television is there, on the network, and cannot play
+        // this. Flattening that into null loses the only diagnosis anyone gets.
+        val fault =
+            """<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><s:Fault>""" +
+                """<detail><UPnPError xmlns="urn:schemas-upnp-org:control-1-0">""" +
+                """<errorCode>714</errorCode><errorDescription>Illegal MIME-type</errorDescription>""" +
+                """</UPnPError></detail></s:Fault></s:Body></s:Envelope>"""
+        response = "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/xml\r\n" +
+            "Content-Length: ${fault.length}\r\nConnection: close\r\n\r\n" + fault
+
+        val result = client().call(
+            controlUrl(),
+            DlnaClient.AV_TRANSPORT,
+            "SetAVTransportURI",
+            "<InstanceID>0</InstanceID>",
+        )
+        assertTrue(result.toString(), result is SoapResult.Refused)
+        assertEquals(714, (result as SoapResult.Refused).fault.code)
+    }
+
+    @Test
+    fun `a device that is not there is unreachable, which is a different thing`() {
+        val result = client().call(
+            "http://127.0.0.1:1/control",
+            DlnaClient.AV_TRANSPORT,
+            "Play",
+            "<InstanceID>0</InstanceID>",
+        )
+        assertTrue(result.toString(), result is SoapResult.Unreachable)
     }
 }
