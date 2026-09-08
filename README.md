@@ -5,7 +5,7 @@ for, and the smallest amount of chrome needed to get to the next one.
 
 ## Installing
 
-`dist/vox-browser-2.2.apk` is a signed release build. Copy it to the phone and open it;
+`dist/vox-browser-2.3.apk` is a signed release build. Copy it to the phone and open it;
 Android will ask you to allow installs from your file manager the first time. Minimum Android
 8.0 (API 26).
 
@@ -283,18 +283,27 @@ that behaves differently. Leaving fullscreen, rotating the phone and switching t
 the session alone; the toolbar's media button becomes the sign that casting is happening and
 the way back to the controls.
 
-What makes this more than a button is that a receiver fetches the stream itself, over its own
-connection, with none of the browser's cookies, headers or origin. The phone playing something
-is therefore no evidence that a television could, and the interesting work is in saying so.
-A stream assembled in the page by Media Source has a `blob:` address that means nothing
-anywhere else; protected content is decrypted by the phone as it plays and a licence belongs to
-the site rather than to the browser; an address only this device can resolve is not an address.
-Each of those is refused with the actual reason rather than sent and left to fail on a black
-screen. What survives that is then *asked the question the receiver will ask*: one anonymous
-ranged request from this device, no cookies, short timeout. A stream that plays here because
-the user is signed in answers a stranger with a 403, or — more often, and more quietly — with a
-sign-in page carrying a perfectly successful status code. Both become a sentence before a
-session is started rather than a television showing nothing.
+**Finding an address to send.** Almost no video site hands a `<video>` element a URL any more:
+hls.js, dash.js and Shaka all feed a MediaSource, so `currentSrc` is a `blob:` that exists
+nowhere outside the document. Reading only the element means refusing essentially the whole
+modern streaming web — technically right, and useless. But the *manifest* those players are
+reading is an ordinary address, and a Cast receiver plays HLS and DASH natively. So the browser
+remembers the first playlist each document fetches; it is already watching every request in
+order to block adverts, and noticing that one of them is a playlist costs nothing more. The
+first is kept rather than the newest, because that is the master playlist that carries every
+quality, while a live player re-requests its variant for ever. It is recorded *after* the
+blocking decision, so a pre-roll's own playlist — often the first a page asks for — can never
+be what appears on somebody's television.
+
+What is left is what genuinely cannot be sent, and the interesting work is saying so. Protected
+content is decrypted by the phone as it plays and the licence belongs to the site rather than
+the browser; an address only this device can resolve is not an address; a page that assembles a
+stream and fetches no playlist has nothing to hand over. Each is refused with the actual
+reason. What survives is then *asked the question the receiver will ask*: one anonymous ranged
+request from this device, no cookies, short timeout. A stream that plays here because the user
+is signed in answers a stranger with a 403, or — more often, and more quietly — with a sign-in
+page carrying a perfectly successful status code. Both become a sentence before a session is
+started rather than a television showing nothing.
 
 Nothing is downloaded and re-uploaded: the receiver is given the address and fetches the
 original, so the quality is whatever the source serves. Ending a session brings playback back

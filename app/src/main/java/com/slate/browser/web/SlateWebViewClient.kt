@@ -16,6 +16,7 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import com.slate.browser.cast.MediaManifests
 import com.slate.browser.tabs.Tab
 import com.slate.browser.util.UrlUtils
 
@@ -49,12 +50,14 @@ class SlateWebViewClient(
         view: WebView,
         request: WebResourceRequest,
     ): WebResourceResponse? {
-        if (!blockingEnabled()) return null
         // The page's own address decides what counts as third-party and which `$domain=` rules
         // apply, and it cannot be read from a network thread, so it is captured as it changes.
-        if (!blocker.shouldBlock(request, documentUrl)) return null
-        onRequestBlocked()
-        return blocker.blockedResponse(request)
+        if (blockingEnabled() && blocker.shouldBlock(request, documentUrl)) {
+            onRequestBlocked()
+            return blocker.blockedResponse(request)
+        }
+        noteMediaManifest(request)
+        return null
     }
 
     /**
@@ -143,8 +146,24 @@ class SlateWebViewClient(
      */
     private var pendingHttpStatus: Int? = null
 
+    /**
+     * Remembers the first stream manifest this document fetches, so a player that feeds a
+     * MediaSource can still be cast: the element's own source is a `blob:` that exists nowhere
+     * else, but the playlist it is reading is an ordinary address a receiver can open.
+     *
+     * Deliberately after the blocking decision, so an advert's own playlist — a pre-roll is
+     * often the first manifest a page asks for — is never what gets sent to the television.
+     */
+    private fun noteMediaManifest(request: WebResourceRequest) {
+        if (tab.observedManifest != null) return
+        val url = runCatching { request.url.toString() }.getOrNull() ?: return
+        if (MediaManifests.isManifest(url)) tab.observedManifest = url
+    }
+
     override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
         documentUrl = url
+        // A new document is a new stream; the last page's playlist is not this page's.
+        tab.observedManifest = null
         pendingMainFrame = null
         pendingHttpStatus = null
         pageStarted(tab, url)
@@ -178,6 +197,7 @@ class SlateWebViewClient(
     override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
         // Single-page apps navigate without a page load; keep the omnibox honest.
         documentUrl = url
+        tab.observedManifest = null
         tab.url = url
         tab.canGoBack = view.canGoBack()
         tab.canGoForward = view.canGoForward()

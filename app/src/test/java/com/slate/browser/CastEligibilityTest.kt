@@ -39,7 +39,8 @@ class CastEligibilityTest {
         pageTitle = "A page",
     )
 
-    private fun evaluate(state: MediaState) = CastEligibility.evaluate(state, "https://example.com/watch")
+    private fun evaluate(state: MediaState, observedManifest: String? = null) =
+        CastEligibility.evaluate(state, "https://example.com/watch", observedManifest)
 
     @Test
     fun `an ordinary progressive video is castable`() {
@@ -67,11 +68,55 @@ class CastEligibilityTest {
     }
 
     @Test
-    fun `a stream the page assembles itself cannot be sent anywhere`() {
-        // Media Source: the blob address means nothing outside the document that made it.
+    fun `a Media Source player is cast by the manifest it is reading`() {
+        /*
+         * The case that matters, because it is nearly all of them. hls.js, dash.js and Shaka
+         * all feed a MediaSource, so the element's source is a blob that exists nowhere else —
+         * but the playlist the player is reading is an ordinary address, and a receiver opens
+         * HLS and DASH natively. Refusing here, which is what the first version did, meant
+         * refusing essentially the whole modern streaming web while being technically right.
+         */
+        val mse = video(src = "blob:https://example.com/9a7c-…", mse = true, live = true)
+
+        val hls = evaluate(mse, observedManifest = "https://cdn.example.com/live/master.m3u8")
+        assertTrue(hls.toString(), hls is CastVerdict.Castable)
+        assertEquals("https://cdn.example.com/live/master.m3u8", (hls as CastVerdict.Castable).url)
+        assertEquals(StreamFormat.HLS, hls.format)
+        assertTrue(hls.isLive)
+
+        val dash = evaluate(mse, observedManifest = "https://cdn.example.com/v/manifest.mpd")
+        assertEquals(StreamFormat.DASH, (dash as CastVerdict.Castable).format)
+    }
+
+    @Test
+    fun `a Media Source player with no manifest seen yet says what would help`() {
         val verdict = evaluate(video(src = "blob:https://example.com/9a7c-…", mse = true))
         assertTrue(verdict is CastVerdict.Refused)
-        assertTrue((verdict as CastVerdict.Refused).reason.contains("inside the page"))
+        val reason = (verdict as CastVerdict.Refused).reason
+        assertTrue(reason, reason.contains("inside the page"))
+        assertTrue("the message must say what to try", reason.contains("Starting playback"))
+    }
+
+    @Test
+    fun `the element's own address wins over anything seen on the network`() {
+        // A plain file needs no guessing, and a manifest from an earlier video on the same page
+        // must not override the video actually loaded.
+        val verdict = evaluate(
+            video(src = "https://cdn.example.com/movie.mp4"),
+            observedManifest = "https://cdn.example.com/other/master.m3u8",
+        )
+        assertEquals("https://cdn.example.com/movie.mp4", (verdict as CastVerdict.Castable).url)
+    }
+
+    @Test
+    fun `protection is refused whatever address was seen`() {
+        // The content is decrypted by the phone as it plays; no URL changes that.
+        val verdict = evaluate(
+            video(src = "blob:x", mse = true, drm = true),
+            observedManifest = "https://cdn.example.com/live/master.m3u8",
+        )
+        assertTrue(verdict is CastVerdict.Refused)
+        assertTrue((verdict as CastVerdict.Refused).reason.contains("copy-protected"))
     }
 
     @Test

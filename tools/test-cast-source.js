@@ -115,6 +115,58 @@ const SWAPPED = `
     swapped ? swapped.src : 'no report',
   );
 
+  // ---- The case that matters: a player feeding MediaSource from a playlist ------------
+  /*
+   * This is what nearly every video site does, and what the first version of casting refused.
+   * The element's source is a blob that exists nowhere else — but the playlist the player
+   * fetched is an ordinary address, and the browser sees every request in order to block
+   * adverts. This checks both halves of that in a real engine: the element reports honestly,
+   * and the manifest really is observable on the network.
+   */
+  const HLS_LIKE = `
+    <!doctype html><meta charset="utf-8"><title>Live channel</title>
+    <body style="margin:0;background:#000">
+    <video id="v" autoplay muted playsinline style="width:100%;height:100vh"></video>
+    <script>
+      (async () => {
+        // A player reads its playlist first, exactly as hls.js does...
+        await fetch('/live/master.m3u8?token=abc');
+        // ...and then feeds the decoder itself, so the element only ever sees a blob.
+        const buffer = await (await fetch('/clip.webm')).arrayBuffer();
+        const source = new MediaSource();
+        document.getElementById('v').src = URL.createObjectURL(source);
+        source.addEventListener('sourceopen', () => {
+          const sb = source.addSourceBuffer('video/webm; codecs="vp8"');
+          sb.addEventListener('updateend', () => {
+            if (source.readyState === 'open') source.endOfStream();
+            window.__ready = true;
+          });
+          sb.appendBuffer(buffer);
+        });
+      })();
+    </script>`;
+
+  const seenRequests = [];
+  page.on('request', (r) => seenRequests.push(r.url()));
+  const hls = await report('/channel', HLS_LIKE, { wait: 2600 });
+  check(
+    'a playlist-driven player still reports only a blob',
+    !!hls && hls.mse === true && hls.src.startsWith('blob:'),
+    hls ? `mse=${hls.mse}` : 'no report',
+  );
+  const manifest = seenRequests.find((u) => u.includes('/live/master.m3u8'));
+  check(
+    'but the playlist it read is visible on the network, which is what gets cast',
+    !!manifest,
+    manifest || 'no manifest request seen',
+  );
+  // The shape the browser's classifier accepts: a path ending in .m3u8, tokens and all.
+  check(
+    'and the address is the shape the manifest classifier accepts',
+    !!manifest && new URL(manifest).pathname.endsWith('.m3u8'),
+    manifest ? new URL(manifest).pathname : '',
+  );
+
   // ---- A player inside a cross-origin iframe ------------------------------------------
   h.crossOrigin.pages.set('/inner', PROGRESSIVE);
   h.sameOrigin.pages.set('/outer', `

@@ -76,6 +76,17 @@ class Tab(
     var dialogsSuppressed by mutableStateOf(false)
         internal set
 
+    /**
+     * The first streaming manifest this document asked the network for.
+     *
+     * Written from WebView's network threads and read from the main one, so it is a plain
+     * volatile field rather than snapshot state. The *first* is kept because that is the
+     * master playlist — the one that carries every quality — while the variant playlists a
+     * live player re-requests for ever would pin the receiver to a single bitrate.
+     */
+    @Volatile
+    internal var observedManifest: String? = null
+
     /** How many requests this page had refused, reset on every navigation. */
     var blockedCount by mutableIntStateOf(0)
         internal set

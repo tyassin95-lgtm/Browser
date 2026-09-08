@@ -798,9 +798,19 @@ class BrowserViewModel @JvmOverloads constructor(
      * be cast" is a fact about the page, not about the television — making the user pick a
      * device to be told that would be a worse way of saying the same thing.
      */
+    /**
+     * What could be sent, taking both the element's own source and the manifest the page was
+     * seen fetching into account.
+     */
+    private fun castVerdict(): CastVerdict = CastEligibility.evaluate(
+        media = media,
+        pageUrl = activeTab?.url.orEmpty(),
+        observedManifest = activeTab?.observedManifest,
+    )
+
     fun openCastPicker() {
         val controller = cast ?: return
-        when (val verdict = CastEligibility.evaluate(media, activeTab?.url.orEmpty())) {
+        when (val verdict = castVerdict()) {
             is CastVerdict.NothingPlaying -> snack("Nothing is playing to cast")
             is CastVerdict.Refused -> snack(verdict.reason)
             is CastVerdict.Castable -> {
@@ -844,7 +854,8 @@ class BrowserViewModel @JvmOverloads constructor(
      */
     private fun sendToReceiver() {
         val controller = cast ?: return
-        val verdict = CastEligibility.evaluate(media, activeTab?.url.orEmpty())
+        val verdict = castVerdict()
+        castHandoffPending = false
         if (verdict !is CastVerdict.Castable) {
             val reason = (verdict as? CastVerdict.Refused)?.reason ?: "Nothing is playing to cast"
             controller.disconnect()

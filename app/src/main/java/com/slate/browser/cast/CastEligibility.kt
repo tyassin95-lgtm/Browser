@@ -43,23 +43,40 @@ sealed interface CastVerdict {
 
 object CastEligibility {
 
-    fun evaluate(media: MediaState, pageUrl: String): CastVerdict {
+    /**
+     * @param observedManifest the first stream manifest the page fetched, if any. This is what
+     *   makes the feature useful rather than merely correct: almost every video site now feeds
+     *   a MediaSource, so the element's own source is a `blob:` that exists nowhere outside the
+     *   document — while the playlist the page is reading is an ordinary address a receiver
+     *   opens natively.
+     */
+    fun evaluate(
+        media: MediaState,
+        pageUrl: String,
+        observedManifest: String? = null,
+    ): CastVerdict {
         if (!media.hasMedia) return CastVerdict.NothingPlaying
 
+        // Protection is about the content, not about where it lives, so no address helps.
         if (media.isProtected) {
             return CastVerdict.Refused(
                 "This video is copy-protected, so it can only play on this phone.",
             )
         }
-        if (media.isStreamedInPage) {
-            return CastVerdict.Refused(
-                "This site builds the video inside the page, so there is no address a TV can open.",
-            )
-        }
 
-        val url = media.sourceUrl.trim()
+        val elementSource = media.sourceUrl.trim()
+        val usableElementSource = elementSource.takeIf { !media.isStreamedInPage && it.isNotEmpty() }
+        val url = usableElementSource ?: observedManifest?.trim().orEmpty()
+
         if (url.isEmpty()) {
-            return CastVerdict.Refused("The browser can't tell where this video is coming from.")
+            return CastVerdict.Refused(
+                if (media.isStreamedInPage) {
+                    "This site builds the video inside the page, so there is no address a TV " +
+                        "can open. Starting playback first sometimes gives the browser one."
+                } else {
+                    "The browser can't tell where this video is coming from."
+                },
+            )
         }
         if (!UrlSafety.isWeb(url)) {
             return CastVerdict.Refused("This video isn't at an address a TV can open.")
