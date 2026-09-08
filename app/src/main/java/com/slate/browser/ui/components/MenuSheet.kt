@@ -21,6 +21,8 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.ArrowForward
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Cast
+import androidx.compose.material.icons.rounded.CastConnected
 import androidx.compose.material.icons.rounded.DesktopWindows
 import androidx.compose.material.icons.rounded.Fullscreen
 import androidx.compose.material.icons.rounded.History
@@ -66,6 +68,10 @@ data class MenuActions(
     val onToggleDesktop: () -> Unit,
     val onImmersive: () -> Unit,
     val onMediaFullscreen: () -> Unit,
+    val showCast: Boolean,
+    val castingTo: String,
+    val onCast: () -> Unit,
+    val onStopCast: () -> Unit,
     val onBookmarks: () -> Unit,
     val onHistory: () -> Unit,
     val onSettings: () -> Unit,
@@ -131,6 +137,15 @@ fun MenuSheet(
             ) { onDismiss(); actions.onToggleDesktop() }
             MenuRow(Icons.Rounded.PlayCircle, "Watch video fullscreen") {
                 onDismiss(); actions.onMediaFullscreen()
+            }
+            // Casting is reachable without going fullscreen first. Putting the only way to it
+            // behind the fullscreen player made it something a user had to already know about.
+            if (actions.castingTo.isNotBlank()) {
+                MenuRow(Icons.Rounded.CastConnected, "Stop casting to ${'$'}{actions.castingTo}") {
+                    onDismiss(); actions.onStopCast()
+                }
+            } else if (actions.showCast) {
+                MenuRow(Icons.Rounded.Cast, "Cast to a device") { onDismiss(); actions.onCast() }
             }
             if (actions.showImmersive) {
                 MenuRow(Icons.Rounded.Fullscreen, "Fullscreen browsing") {

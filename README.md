@@ -5,7 +5,7 @@ for, and the smallest amount of chrome needed to get to the next one.
 
 ## Installing
 
-`dist/vox-browser-2.1.apk` is a signed release build. Copy it to the phone and open it;
+`dist/vox-browser-2.2.apk` is a signed release build. Copy it to the phone and open it;
 Android will ask you to allow installs from your file manager the first time. Minimum Android
 8.0 (API 26).
 
@@ -297,10 +297,15 @@ sign-in page carrying a perfectly successful status code. Both become a sentence
 session is started rather than a television showing nothing.
 
 Nothing is downloaded and re-uploaded: the receiver is given the address and fetches the
-original, so the quality is whatever the source serves. Discovery runs quietly while there is
-something castable on the page and scans hard only while the picker is open, because a button
-that promises to go looking is worse than no button and an active scan is not free. Ending
-a session brings playback back to the phone at the position the receiver reached.
+original, so the quality is whatever the source serves. Ending a session brings playback back
+to the phone at the position the receiver reached.
+
+Casting is reachable from two places: the menu, whenever a page has media, and the top row of
+the fullscreen player. Both lead to the same picker. Discovery runs quietly while there is
+something castable on the page and scans actively while the picker is open — but the control
+does not wait for a device to be found before appearing, because a control that only shows up
+after the scan it is supposed to start is a control nobody finds. An empty picker saying it is
+looking is a better answer than no button.
 
 **Media controls.** Play and pause, a scrub bar with position and duration, and volume. The
 elapsed time follows the thumb while a drag is in progress and the stream the rest of the time,

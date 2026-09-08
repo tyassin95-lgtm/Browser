@@ -45,25 +45,19 @@ class CastStateTest {
     }
 
     @Test
-    fun `the button is offered only when there is a framework and something to send to`() {
+    fun `the button is offered whenever the framework is up, found a device or not`() {
         assertFalse(
             "no framework means no button, however many devices were remembered",
             CastState(stage = CastStage.UNAVAILABLE, devices = listOf(device())).canOffer,
         )
-        assertFalse(
-            "an empty network means no button",
+        // Not conditioned on having already found something. Requiring a device meant the
+        // control appeared only after a scan the control itself starts, so on a quiet network
+        // the user got no button and no explanation — the picker's empty state is the answer.
+        assertTrue(
+            "the button must appear before anything has been found",
             CastState(stage = CastStage.IDLE).canOffer,
         )
         assertTrue(CastState(stage = CastStage.IDLE, devices = listOf(device())).canOffer)
-    }
-
-    @Test
-    fun `a receiver that disappears takes the button with it`() {
-        // Discovery is not stable on a busy network, and a list that keeps a device after it
-        // has gone offers the user a connection that cannot be made.
-        val seen = CastState(stage = CastStage.IDLE, devices = listOf(device()))
-        assertTrue(seen.canOffer)
-        assertFalse(seen.copy(devices = emptyList()).canOffer)
     }
 
     @Test

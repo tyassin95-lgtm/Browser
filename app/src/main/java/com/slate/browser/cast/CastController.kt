@@ -44,7 +44,17 @@ data class CastState(
         get() = stage == CastStage.PLAYING || stage == CastStage.PAUSED || stage == CastStage.LOADING
 
     val isPlaying: Boolean get() = stage == CastStage.PLAYING
-    val canOffer: Boolean get() = stage != CastStage.UNAVAILABLE && devices.isNotEmpty()
+
+    /**
+     * Whether the browser can offer to cast at all.
+     *
+     * Deliberately not conditioned on having already found a device. Waiting for one meant the
+     * control appeared only after a scan the control itself was supposed to start, and on a
+     * network with nothing on it the user was left with no button and no explanation. Offering
+     * it whenever the framework is up, and letting the picker say what it finds, is the honest
+     * arrangement — an empty list is an answer.
+     */
+    val canOffer: Boolean get() = stage != CastStage.UNAVAILABLE
 }
 
 /**

@@ -949,6 +949,10 @@ class BrowserViewModel @JvmOverloads constructor(
      */
     private fun updateCastDiscovery() {
         val controller = cast ?: return
+        // A framework that was not ready the first time — Play Services updating, or disabled
+        // and since re-enabled — gets another chance whenever there is a reason to care. The
+        // call is a no-op once it has succeeded.
+        controller.initialise()
         when {
             castPickerOpen -> controller.startDiscovery(active = true)
             media.hasMedia || castState.isActive -> controller.startDiscovery(active = false)
