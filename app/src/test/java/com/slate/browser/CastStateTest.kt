@@ -1,0 +1,81 @@
+package com.slate.browser
+
+import com.slate.browser.cast.CastDevice
+import com.slate.browser.cast.CastStage
+import com.slate.browser.cast.CastState
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * What the rest of the browser reads off a cast session.
+ *
+ * These are the predicates the transport and the toolbar branch on, so getting one wrong sends
+ * play/pause to the wrong end — the phone and the television both playing, or neither.
+ */
+class CastStateTest {
+
+    @Test
+    fun `a session that is merely connecting is active but not yet driving playback`() {
+        val connecting = CastState(stage = CastStage.CONNECTING, deviceName = "Living Room")
+        assertTrue("the indicator must show while connecting", connecting.isActive)
+        assertFalse(
+            "the transport must still drive the phone until the receiver has the media",
+            connecting.isPlayingRemotely,
+        )
+    }
+
+    @Test
+    fun `loading, playing and paused all mean the receiver owns the media`() {
+        listOf(CastStage.LOADING, CastStage.PLAYING, CastStage.PAUSED).forEach { stage ->
+            assertTrue("$stage must route the transport to the receiver", CastState(stage = stage).isPlayingRemotely)
+        }
+        assertTrue(CastState(stage = CastStage.PLAYING).isPlaying)
+        assertFalse(CastState(stage = CastStage.PAUSED).isPlaying)
+    }
+
+    @Test
+    fun `an idle or failed session gives the controls back to the phone`() {
+        listOf(CastStage.IDLE, CastStage.FAILED, CastStage.UNAVAILABLE).forEach { stage ->
+            val state = CastState(stage = stage)
+            assertFalse("$stage must not be active", state.isActive)
+            assertFalse("$stage must not hold the transport", state.isPlayingRemotely)
+        }
+    }
+
+    @Test
+    fun `the button is offered only when there is a framework and something to send to`() {
+        assertFalse(
+            "no framework means no button, however many devices were remembered",
+            CastState(stage = CastStage.UNAVAILABLE, devices = listOf(device())).canOffer,
+        )
+        assertFalse(
+            "an empty network means no button",
+            CastState(stage = CastStage.IDLE).canOffer,
+        )
+        assertTrue(CastState(stage = CastStage.IDLE, devices = listOf(device())).canOffer)
+    }
+
+    @Test
+    fun `a receiver that disappears takes the button with it`() {
+        // Discovery is not stable on a busy network, and a list that keeps a device after it
+        // has gone offers the user a connection that cannot be made.
+        val seen = CastState(stage = CastStage.IDLE, devices = listOf(device()))
+        assertTrue(seen.canOffer)
+        assertFalse(seen.copy(devices = emptyList()).canOffer)
+    }
+
+    @Test
+    fun `the default state offers nothing at all`() {
+        // A device without Play Services, or with it disabled, must behave exactly as the
+        // browser did before casting existed.
+        val fresh = CastState()
+        assertEquals(CastStage.UNAVAILABLE, fresh.stage)
+        assertFalse(fresh.canOffer)
+        assertFalse(fresh.isActive)
+        assertFalse(fresh.isPlayingRemotely)
+    }
+
+    private fun device() = CastDevice(id = "route-1", name = "Living Room TV", isSelected = false)
+}

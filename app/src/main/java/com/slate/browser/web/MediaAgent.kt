@@ -21,6 +21,19 @@ data class MediaState(
     val durationMs: Long = 0,
     val seekableStartMs: Long = 0,
     val seekableEndMs: Long = 0,
+    /** The page's own media element is an `<audio>`: real media, but nothing to display. */
+    val audioOnly: Boolean = false,
+    /**
+     * The address the element settled on, as a receiver elsewhere would have to fetch it. A
+     * `blob:` here means the stream is assembled inside the page and exists nowhere else.
+     */
+    val sourceUrl: String = "",
+    /** The source is assembled by Media Source Extensions, or is a data URL. */
+    val isStreamedInPage: Boolean = false,
+    /** The element is decrypting as it plays: the content is protected. */
+    val isProtected: Boolean = false,
+    val posterUrl: String = "",
+    val pageTitle: String = "",
 ) {
     /** Natural aspect ratio of the stream, or 0 when nothing has been decoded yet. */
     val aspect: Float get() = if (width > 0 && height > 0) width.toFloat() / height else 0f
@@ -30,6 +43,9 @@ data class MediaState(
      * a stream that has not decoded a frame yet — is not treated as a guess either way.
      */
     val prefersLandscape: Boolean get() = aspect >= 1.15f
+
+    /** Something is playing that the browser can offer controls for. */
+    val hasMedia: Boolean get() = hasVideo || audioOnly
 
     /** A recorded video with a known length: an ordinary scrub bar applies. */
     val isSeekable: Boolean get() = !isLive && durationMs > 0
@@ -120,6 +136,11 @@ class MediaAgent(context: Context) {
 
     fun toggleMute(webView: WebView) = command(webView, "mute")
 
+    /** Explicit transitions, for the moments the browser knows which state it wants. */
+    fun play(webView: WebView) = command(webView, "play")
+
+    fun pause(webView: WebView) = command(webView, "pause")
+
     fun seekTo(webView: WebView, positionMs: Long) =
         command(webView, "seek", (positionMs / 1000.0).toString())
 
@@ -168,6 +189,12 @@ class MediaAgent(context: Context) {
                         durationMs = o.seconds("d"),
                         seekableStartMs = o.seconds("ss"),
                         seekableEndMs = o.seconds("se"),
+                        audioOnly = o.optBoolean("audioOnly"),
+                        sourceUrl = o.optString("src").take(MAX_URL_CHARS),
+                        isStreamedInPage = o.optBoolean("mse"),
+                        isProtected = o.optBoolean("drm"),
+                        posterUrl = o.optString("poster").take(MAX_URL_CHARS),
+                        pageTitle = o.optString("title").take(MAX_TITLE_CHARS),
                     )
                 }.getOrNull() ?: return@named
                 main.post { onState(state) }
@@ -183,6 +210,10 @@ class MediaAgent(context: Context) {
 
         /** No display is this large; a page claiming otherwise is claiming it for a reason. */
         const val MAX_DIMENSION = 16384
+
+        /** Page-supplied strings are bounded before they are held, like every other field. */
+        const val MAX_URL_CHARS = 4096
+        const val MAX_TITLE_CHARS = 300
 
         /** Times arrive as seconds from the page, and a page can send anything at all. */
         fun JSONObject.seconds(key: String): Long {

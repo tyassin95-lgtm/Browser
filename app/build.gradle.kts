@@ -26,8 +26,8 @@ android {
         applicationId = "com.slate.browser"
         minSdk = 26
         targetSdk = 35
-        versionCode = 11
-        versionName = "2.0"
+        versionCode = 12
+        versionName = "2.1"
         vectorDrawables.useSupportLibrary = true
     }
 
@@ -72,6 +72,12 @@ android {
         unitTests {
             isIncludeAndroidResources = true
             isReturnDefaultValues = true
+            all {
+                // Robolectric loads a full Android runtime per SDK, and the suite now also
+                // pulls in the Cast framework's classes. The default fork heap is not enough
+                // for that, and running out of it surfaces as an unrelated test failing.
+                it.maxHeapSize = "2g"
+            }
         }
     }
     buildFeatures {
@@ -112,6 +118,8 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.splashscreen)
     implementation(libs.androidx.webkit)
+    implementation(libs.androidx.mediarouter)
+    implementation(libs.play.services.cast.framework)
     implementation(libs.androidx.media)
 
     implementation(platform(libs.androidx.compose.bom))

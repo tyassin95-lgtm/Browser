@@ -5,7 +5,7 @@ for, and the smallest amount of chrome needed to get to the next one.
 
 ## Installing
 
-`dist/vox-browser-2.0.apk` is a signed release build. Copy it to the phone and open it;
+`dist/vox-browser-2.1.apk` is a signed release build. Copy it to the phone and open it;
 Android will ask you to allow installs from your file manager the first time. Minimum Android
 8.0 (API 26).
 
@@ -268,6 +268,40 @@ decoys are skipped, and a canvas the player draws into is promoted alongside the
 so canvas-rendered players show a picture too. A watchdog re-asserts all of it against players
 that rewrite their own layout.
 
+**Casting.** Whatever is playing can be sent to a nearby receiver from the same media controls
+that drive it on the phone. Google Cast is the mechanism — Chromecast, Android TV, Google TV
+and the televisions and speakers with it built in — because it is the only casting stack on
+Android with first-party discovery, a maintained library and a receiver on enough hardware to
+be worth the name. It is also the one Chrome uses on this platform. DLNA would mean an
+unmaintained third-party stack and hand-rolled SSDP; AirPlay is not open to Android apps;
+screen mirroring sends the whole phone rather than the media, and the system already offers it.
+
+The transport does not change. While a receiver has the media, its position, duration and
+playback state are merged over the page's report and the same buttons drive the receiver
+instead of the video element — one set of controls, two backends, rather than a second player
+that behaves differently. Leaving fullscreen, rotating the phone and switching tabs all leave
+the session alone; the toolbar's media button becomes the sign that casting is happening and
+the way back to the controls.
+
+What makes this more than a button is that a receiver fetches the stream itself, over its own
+connection, with none of the browser's cookies, headers or origin. The phone playing something
+is therefore no evidence that a television could, and the interesting work is in saying so.
+A stream assembled in the page by Media Source has a `blob:` address that means nothing
+anywhere else; protected content is decrypted by the phone as it plays and a licence belongs to
+the site rather than to the browser; an address only this device can resolve is not an address.
+Each of those is refused with the actual reason rather than sent and left to fail on a black
+screen. What survives that is then *asked the question the receiver will ask*: one anonymous
+ranged request from this device, no cookies, short timeout. A stream that plays here because
+the user is signed in answers a stranger with a 403, or — more often, and more quietly — with a
+sign-in page carrying a perfectly successful status code. Both become a sentence before a
+session is started rather than a television showing nothing.
+
+Nothing is downloaded and re-uploaded: the receiver is given the address and fetches the
+original, so the quality is whatever the source serves. Discovery runs quietly while there is
+something castable on the page and scans hard only while the picker is open, because a button
+that promises to go looking is worse than no button and an active scan is not free. Ending
+a session brings playback back to the phone at the position the receiver reached.
+
 **Media controls.** Play and pause, a scrub bar with position and duration, and volume. The
 elapsed time follows the thumb while a drag is in progress and the stream the rest of the time,
 so the number and the bar never disagree mid-gesture.
@@ -324,6 +358,7 @@ cd tools && node test-popup-guard.mjs    # the in-page guard against real pop-up
 cd tools && node test-error-recovery.mjs # the content probe against real challenge pages
 cd tools && node test-keyboard-viewport.mjs # focused fields staying visible in a real engine
 cd tools && node test-bridge-isolation.mjs # what a hostile iframe can reach, in a real engine
+cd tools && node test-cast-source.js     # what the browser learns about a page's media
 ```
 
 The Android tests include `BrowserUiTest` and `MediaFullscreenTest`, which compose the actual

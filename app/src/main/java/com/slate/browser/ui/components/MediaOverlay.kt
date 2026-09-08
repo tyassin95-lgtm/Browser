@@ -24,6 +24,8 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Cast
+import androidx.compose.material.icons.rounded.CastConnected
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CropFree
 import androidx.compose.material.icons.rounded.Fullscreen
@@ -88,6 +90,12 @@ fun MediaFullscreenOverlay(
     onSeek: (Long) -> Unit,
     onJumpToLive: () -> Unit,
     onVolume: (Float) -> Unit,
+    /** Whether a receiver is nearby; the control is absent rather than disabled when not. */
+    canCast: Boolean,
+    /** The name of the receiver currently playing this, or blank when playing here. */
+    castingTo: String,
+    onCast: () -> Unit,
+    onStopCast: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val owned = mode == MediaOverlayMode.BROWSER
@@ -145,6 +153,10 @@ fun MediaFullscreenOverlay(
                     onExit = onExit,
                     onToggleFit = { onToggleFit(); touch() },
                     onJumpToLive = { onJumpToLive(); touch() },
+                    canCast = canCast,
+                    castingTo = castingTo,
+                    onCast = { onCast(); touch() },
+                    onStopCast = { onStopCast(); touch() },
                     modifier = Modifier.align(Alignment.TopStart),
                 )
 
@@ -163,6 +175,10 @@ fun MediaFullscreenOverlay(
             }
         }
 
+        if (castingTo.isNotBlank()) {
+            CastingBanner(deviceName = castingTo, modifier = Modifier.align(Alignment.Center))
+        }
+
         HintPill(
             text = if (owned) "Swipe down to exit" else "Swipe down from the top to exit",
             modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 96.dp),
@@ -179,6 +195,10 @@ private fun TopControls(
     onExit: () -> Unit,
     onToggleFit: () -> Unit,
     onJumpToLive: () -> Unit,
+    canCast: Boolean,
+    castingTo: String,
+    onCast: () -> Unit,
+    onStopCast: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Row(
@@ -194,7 +214,15 @@ private fun TopControls(
             LiveBadge(atEdge = media.isAtLiveEdge, onJumpToLive = onJumpToLive)
         }
         Spacer(Modifier.weight(1f))
+        // One control, two meanings: send it somewhere, or bring it back. Nothing is added to
+        // the bar when there is nothing nearby to send to.
+        if (castingTo.isNotBlank()) {
+            ScrimButton(Icons.Rounded.CastConnected, "Stop casting to ${'$'}castingTo", onClick = onStopCast)
+        } else if (canCast) {
+            ScrimButton(Icons.Rounded.Cast, "Cast to a device", onClick = onCast)
+        }
         if (showFitControl) {
+            Spacer(Modifier.width(4.dp))
             ScrimButton(
                 icon = if (isFilling) Icons.Rounded.CropFree else Icons.Rounded.Fullscreen,
                 description = if (isFilling) "Fit the whole frame" else "Fill the screen",
@@ -435,6 +463,34 @@ private fun whiteSlider() = SliderDefaults.colors(
 private fun scrimGradient() = androidx.compose.ui.graphics.Brush.verticalGradient(
     listOf(Color.Transparent, Color.Black.copy(alpha = 0.55f)),
 )
+
+/**
+ * What is on screen while the television has the picture.
+ *
+ * The page's own video is paused behind this, so without it the viewer would be looking at a
+ * still frame or a black rectangle with no explanation of where their video went.
+ */
+@Composable
+private fun CastingBanner(deviceName: String, modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Icon(
+            Icons.Rounded.CastConnected,
+            contentDescription = null,
+            tint = Color.White,
+            modifier = Modifier.size(38.dp),
+        )
+        Spacer(Modifier.height(10.dp))
+        Text(
+            "Casting to ${'$'}deviceName",
+            color = Color.White,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Medium,
+        )
+    }
+}
 
 private const val CONTROLS_TIMEOUT_MS = 3_600L
 private const val HINT_TIMEOUT_MS = 2_600L

@@ -26,6 +26,8 @@ import com.slate.browser.ui.theme.SlateTheme
 import com.slate.browser.web.BrowserHost
 import com.slate.browser.web.MediaAgent
 import com.slate.browser.web.MediaFit
+import com.slate.browser.cast.CastStage
+import com.slate.browser.cast.CastState
 import com.slate.browser.web.MediaState
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -155,6 +157,82 @@ class MediaFullscreenTest {
         org.robolectric.shadows.ShadowLooper.idleMainLooper()
         assertEquals(16384, received?.width)
         assertEquals(0, received?.height)
+    }
+
+    // ---- Casting -------------------------------------------------------------
+
+    @Test
+    fun `the transport reads the receiver while it is casting, and the page otherwise`() {
+        render()
+        val page = MediaState(
+            hasVideo = true, isPlaying = true, width = 1920, height = 1080,
+            positionMs = 5_000, durationMs = 600_000, sourceUrl = "https://cdn.test/a.mp4",
+        )
+        playing(page)
+        compose.waitForIdle()
+
+        // Nothing is casting: what the page said is what the transport shows.
+        assertEquals(5_000L, viewModel.media.positionMs)
+        assertEquals(600_000L, viewModel.media.durationMs)
+        assertTrue(viewModel.media.isPlaying)
+
+        // A receiver has it now. Its position is the true one; the page's is stale the moment
+        // the television starts playing, and showing both would show neither.
+        viewModel.applyCastStateForTest(
+            CastState(
+                stage = CastStage.PLAYING,
+                deviceName = "Living Room TV",
+                positionMs = 120_000,
+                durationMs = 600_000,
+                volume = 0.4f,
+            ),
+        )
+        compose.waitForIdle()
+        assertEquals(120_000L, viewModel.media.positionMs)
+        assertEquals(0.4f, viewModel.media.volume, 0.001f)
+        assertTrue(viewModel.media.isPlaying)
+
+        // What only the page can know still comes from the page.
+        assertEquals(1920, viewModel.media.width)
+        assertTrue(viewModel.media.hasVideo)
+
+        // Paused on the receiver reads as paused here, whatever the page last said.
+        viewModel.applyCastStateForTest(
+            CastState(stage = CastStage.PAUSED, deviceName = "Living Room TV", positionMs = 130_000),
+        )
+        compose.waitForIdle()
+        assertFalse("the receiver is paused, so the button must offer play", viewModel.media.isPlaying)
+
+        // And when the session ends the page is authoritative again.
+        viewModel.applyCastStateForTest(CastState(stage = CastStage.IDLE))
+        compose.waitForIdle()
+        assertEquals(5_000L, viewModel.media.positionMs)
+    }
+
+    @Test
+    fun `a connecting session does not yet take the transport`() {
+        render()
+        playing(MediaState(hasVideo = true, isPlaying = true, width = 1280, height = 720, positionMs = 9_000))
+        viewModel.applyCastStateForTest(CastState(stage = CastStage.CONNECTING, deviceName = "TV"))
+        compose.waitForIdle()
+
+        // The receiver has nothing yet, so the phone is still playing and still in charge.
+        assertEquals(9_000L, viewModel.media.positionMs)
+        assertTrue(viewModel.isCasting)
+    }
+
+    @Test
+    fun `audio with no picture still counts as something to control`() {
+        render()
+        playing(
+            MediaState(
+                hasVideo = false, audioOnly = true, isPlaying = true,
+                sourceUrl = "https://cdn.test/show.mp3", durationMs = 1_800_000,
+            ),
+        )
+        compose.waitForIdle()
+        assertTrue("a podcast page must offer the media control", viewModel.hasPlayableMedia)
+        assertFalse("but it must not claim to have a picture", viewModel.media.hasVideo)
     }
 
     // ---- Offering the control ----------------------------------------------

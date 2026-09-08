@@ -62,6 +62,14 @@
           appear inside its task, where a page the user is signed in to would be framed by
           somebody else's UI.
         -->
+        <!--
+          Play Services reads this by name to find the browser's cast configuration. The class
+          is instantiated reflectively, so it is kept in the release build explicitly.
+        -->
+        <meta-data
+            android:name="com.google.android.gms.cast.framework.OPTIONS_PROVIDER_CLASS_NAME"
+            android:value="com.slate.browser.cast.SlateCastOptionsProvider" />
+
         <activity
             android:name=".MainActivity"
             tools:ignore="DiscouragedApi"

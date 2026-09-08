@@ -36,6 +36,13 @@ import com.slate.browser.tabs.TabManager
 import com.slate.browser.tabs.TabPersistence
 import com.slate.browser.util.ChromeScrollPolicy
 import com.slate.browser.util.UrlUtils
+import com.slate.browser.cast.CastController
+import com.slate.browser.cast.CastEligibility
+import com.slate.browser.cast.CastPreflight
+import com.slate.browser.cast.CastStage
+import com.slate.browser.cast.CastState
+import com.slate.browser.cast.CastVerdict
+import com.slate.browser.cast.StreamFormat
 import com.slate.browser.web.BrowserHost
 import com.slate.browser.web.ContentBlocker
 import com.slate.browser.web.CosmeticFilter
@@ -63,6 +70,8 @@ import com.slate.browser.web.SitePermissionRequest
 import com.slate.browser.web.SlateWebChromeClient
 import com.slate.browser.web.SlateWebViewClient
 import com.slate.browser.web.WebViewConfigurator
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -237,6 +246,7 @@ class BrowserViewModel @JvmOverloads constructor(
         host = browserHost
         downloads = DownloadCoordinator(context.applicationContext, browserHost)
         tabManager.bind(context)
+        attachCast(context)
     }
 
     fun detach() {
@@ -281,6 +291,7 @@ class BrowserViewModel @JvmOverloads constructor(
     }
 
     override fun onCleared() {
+        cast?.release()
         persistSessionNow()
         tabManager.releaseAll()
         super.onCleared()
@@ -630,10 +641,37 @@ class BrowserViewModel @JvmOverloads constructor(
 
     // ---- Browser-owned media fullscreen -------------------------------------
 
-    val media: MediaState get() = activeTab?.media ?: MediaState.NONE
+    /**
+     * What the transport is controlling.
+     *
+     * While a receiver has the media, its position, duration and playback state are the true
+     * ones and the page's are stale — so they are merged over the page's report rather than
+     * kept in a second place. Everything else, including whether the stream is live and what
+     * shape it is, still comes from the page, because the page is what knows. This is what lets
+     * one set of controls drive either end without knowing which end it is driving.
+     */
+    val media: MediaState
+        get() {
+            val page = activeTab?.media ?: MediaState.NONE
+            val remote = castState
+            if (!remote.isPlayingRemotely) return page
+            return page.copy(
+                isPlaying = remote.isPlaying,
+                positionMs = remote.positionMs,
+                durationMs = if (remote.durationMs > 0) remote.durationMs else page.durationMs,
+                volume = remote.volume,
+                isMuted = remote.isMuted,
+            )
+        }
 
-    /** True when there is something worth offering a fullscreen button for. */
-    val hasPlayableMedia: Boolean get() = media.hasVideo
+    /**
+     * True when there is something worth offering the media control for.
+     *
+     * Audio counts. There is no picture to enlarge, but there is a transport worth having and
+     * a stream worth casting, and a podcast page is exactly where sending it to a speaker is
+     * the point.
+     */
+    val hasPlayableMedia: Boolean get() = media.hasMedia
 
     /**
      * Presents the page's main video full screen using the browser's own machinery rather than
@@ -643,9 +681,19 @@ class BrowserViewModel @JvmOverloads constructor(
     fun enterMediaFullscreen() {
         val tab = activeTab ?: return
         val webView = tab.webView ?: return
-        if (!tab.media.hasVideo) {
+        if (!tab.media.hasMedia) {
+            // While a receiver has the media there is still something to control, even on a
+            // tab that is playing nothing itself — including the way to stop it.
+            if (castState.isActive) {
+                overlay = Overlay.NONE
+                blurOmnibox()
+                closeFind()
+                isMediaFullscreen = true
+                isImmersive = true
+                return
+            }
             mediaAgent.scan(webView)
-            snack("No video playing on this page")
+            snack("Nothing is playing on this page")
             return
         }
         overlay = Overlay.NONE
@@ -685,14 +733,26 @@ class BrowserViewModel @JvmOverloads constructor(
     }
 
     fun toggleMediaPlayback() {
+        if (castState.isPlayingRemotely) {
+            if (castState.isPlaying) cast?.pause() else cast?.play()
+            return
+        }
         activeTab?.webView?.let { mediaAgent.togglePlayback(it) }
     }
 
     fun toggleMediaMute() {
+        if (castState.isPlayingRemotely) {
+            cast?.toggleMute()
+            return
+        }
         activeTab?.webView?.let { mediaAgent.toggleMute(it) }
     }
 
     fun seekMedia(positionMs: Long) {
+        if (castState.isPlayingRemotely) {
+            cast?.seekTo(positionMs)
+            return
+        }
         activeTab?.webView?.let { mediaAgent.seekTo(it, positionMs) }
     }
 
@@ -700,11 +760,167 @@ class BrowserViewModel @JvmOverloads constructor(
     fun jumpToLiveEdge() {
         val state = media
         if (!state.isLive) return
+        if (castState.isPlayingRemotely) {
+            cast?.seekToLiveEdge()
+            return
+        }
         activeTab?.webView?.let { mediaAgent.seekTo(it, state.seekableEndMs) }
     }
 
     fun setMediaVolume(volume: Float) {
+        if (castState.isPlayingRemotely) {
+            cast?.setVolume(volume)
+            return
+        }
         activeTab?.webView?.let { mediaAgent.setVolume(it, volume) }
+    }
+
+    // ---- Casting -----------------------------------------------------------
+
+    private var cast: CastController? = null
+
+    var castState by mutableStateOf(CastState())
+        private set
+
+    /** True while the device picker is on screen; discovery runs only for as long as it is. */
+    var castPickerOpen by mutableStateOf(false)
+        private set
+
+    /** Worth showing the button at all: the framework is up and something is nearby. */
+    val canOfferCast: Boolean get() = castState.canOffer
+
+    val isCasting: Boolean get() = castState.isActive
+
+    /**
+     * Opens the device picker, having first established that there is anything worth sending.
+     *
+     * The refusal happens here rather than after a device has been chosen, because "this cannot
+     * be cast" is a fact about the page, not about the television — making the user pick a
+     * device to be told that would be a worse way of saying the same thing.
+     */
+    fun openCastPicker() {
+        val controller = cast ?: return
+        when (val verdict = CastEligibility.evaluate(media, activeTab?.url.orEmpty())) {
+            is CastVerdict.NothingPlaying -> snack("Nothing is playing to cast")
+            is CastVerdict.Refused -> snack(verdict.reason)
+            is CastVerdict.Castable -> {
+                castPickerOpen = true
+                controller.startDiscovery(active = true)
+            }
+        }
+    }
+
+    fun closeCastPicker() {
+        castPickerOpen = false
+        // Back to the quiet watch: an active scan is expensive and nothing is looking at it.
+        updateCastDiscovery()
+    }
+
+    /**
+     * True between choosing a device and handing it the media.
+     *
+     * The load is triggered by an explicit intention rather than by inferring one from the
+     * session's state: a connected session with nothing playing is also what the browser sees
+     * after a video ends, and loading again there would restart something the viewer had
+     * finished with.
+     */
+    private var castHandoffPending = false
+
+    fun connectCast(deviceId: String) {
+        castPickerOpen = false
+        castHandoffPending = true
+        updateCastDiscovery()
+        cast?.connect(deviceId)
+    }
+
+    /**
+     * Sends what the page is playing to the receiver that has just connected.
+     *
+     * The reachability check happens here, between connecting and loading, and it is the whole
+     * reason this is not a one-liner. The receiver fetches the stream itself, with none of this
+     * browser's cookies — so a video the phone plays because the user is signed in can be a
+     * sign-in page to the television. Asking first turns that into a sentence rather than a
+     * black screen nobody can explain.
+     */
+    private fun sendToReceiver() {
+        val controller = cast ?: return
+        val verdict = CastEligibility.evaluate(media, activeTab?.url.orEmpty())
+        if (verdict !is CastVerdict.Castable) {
+            val reason = (verdict as? CastVerdict.Refused)?.reason ?: "Nothing is playing to cast"
+            controller.disconnect()
+            snack(reason)
+            return
+        }
+        val startAt = media.positionMs
+        viewModelScope.launch {
+            val reachable = withContext(Dispatchers.IO) {
+                CastPreflight.check(
+                    verdict.url,
+                    rangedRequest = verdict.format == StreamFormat.PROGRESSIVE,
+                )
+            }
+            val refusal = when (reachable) {
+                is CastPreflight.Result.NeedsSignIn ->
+                    "This video needs you to be signed in, so the TV can't fetch it."
+                is CastPreflight.Result.NotMedia ->
+                    "That address doesn't lead to a video the TV can play."
+                is CastPreflight.Result.Unreachable ->
+                    "The TV wouldn't be able to reach this video."
+                is CastPreflight.Result.Reachable -> null
+            }
+            if (refusal != null) {
+                controller.disconnect()
+                snack(refusal)
+                return@launch
+            }
+            // The phone stops so the room is not hearing both. Its position is where the
+            // receiver picks up.
+            activeTab?.webView?.let { mediaAgent.pause(it) }
+            controller.load(verdict, startAt)
+        }
+    }
+
+    /** Ends the session and brings playback back to the phone where the receiver left it. */
+    fun stopCasting() {
+        castHandoffPending = false
+        cast?.disconnect()
+    }
+
+    private fun resumeOnPhone(positionMs: Long) {
+        val webView = activeTab?.webView ?: return
+        if (positionMs > 0 && !media.isLive) mediaAgent.seekTo(webView, positionMs)
+        mediaAgent.play(webView)
+    }
+
+    /**
+     * Drives the cast state directly, for tests that need a receiver without one being nearby.
+     * The path is the same one the controller's callback uses.
+     */
+    internal fun applyCastStateForTest(state: CastState) {
+        castState = state
+    }
+
+    private fun attachCast(context: Context) {
+        if (cast != null) return
+        val controller = CastController(context.applicationContext)
+        controller.onStateChanged = { next ->
+            val wasPlayingRemotely = castState.isPlayingRemotely
+            castState = next
+            if (castHandoffPending && next.stage == CastStage.CONNECTED) {
+                castHandoffPending = false
+                sendToReceiver()
+            }
+            if (next.stage == CastStage.FAILED) {
+                castHandoffPending = false
+                if (next.message.isNotBlank()) snack(next.message)
+            }
+            if (next.stage == CastStage.IDLE) castHandoffPending = false
+            updateCastDiscovery()
+        }
+        controller.onHandBack = { position -> resumeOnPhone(position) }
+        controller.initialise()
+        cast = controller
+        updateCastDiscovery()
     }
 
     /**
@@ -720,6 +936,23 @@ class BrowserViewModel @JvmOverloads constructor(
         // A stream whose dimensions only arrive after playback starts still gets the rotation.
         if (isMediaFullscreen && tab.id == tabManager.activeTabId) {
             lockLandscapeForMedia = shouldHoldLandscape(state)
+        }
+        if (tab.id == tabManager.activeTabId) updateCastDiscovery()
+    }
+
+    /**
+     * Keeps discovery running exactly as long as it is worth running.
+     *
+     * A quiet watch while there is something castable on the page, so the button can appear
+     * honestly rather than promising to go and look; nothing at all otherwise. The picker
+     * turns it up to an active scan for as long as it is on screen.
+     */
+    private fun updateCastDiscovery() {
+        val controller = cast ?: return
+        when {
+            castPickerOpen -> controller.startDiscovery(active = true)
+            media.hasMedia || castState.isActive -> controller.startDiscovery(active = false)
+            else -> controller.stopDiscovery()
         }
     }
 
@@ -1065,7 +1298,10 @@ class BrowserViewModel @JvmOverloads constructor(
             onState = { state -> onMediaState(tab, state) },
             onNavigationHint = { suppress -> onNavigationHint(tab, suppress) },
             onEnterResult = { success ->
-                if (!success && isMediaFullscreen) {
+                // Audio declines fullscreen by design — there is nothing to put on the screen —
+                // and the controls stay up over a plain backdrop so it can still be driven and
+                // cast. Only a video that could not be reached is a failure worth reporting.
+                if (!success && isMediaFullscreen && !media.audioOnly) {
                     exitMediaFullscreen()
                     snack("Couldn't make this video fullscreen")
                 }

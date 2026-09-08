@@ -67,6 +67,7 @@ import com.slate.browser.Overlay
 import com.slate.browser.data.Suggestion
 import com.slate.browser.web.MediaFit
 import com.slate.browser.web.NavigationDirection
+import com.slate.browser.ui.components.CastPickerSheet
 import com.slate.browser.ui.components.FindBar
 import com.slate.browser.ui.components.FullscreenHost
 import com.slate.browser.ui.components.LandscapeBar
@@ -188,6 +189,8 @@ fun BrowserScreen(
                         onImmersive = viewModel::enterImmersive,
                         showMedia = viewModel.hasPlayableMedia,
                         onMedia = viewModel::enterMediaFullscreen,
+                        casting = viewModel.isCasting,
+                        castingTo = viewModel.castState.deviceName,
                         onTabs = { viewModel.showOverlay(Overlay.TABS) },
                         onMenu = { menuOpen = true },
                     )
@@ -201,6 +204,8 @@ fun BrowserScreen(
                         tabCount = viewModel.tabManager.count,
                         showMedia = viewModel.hasPlayableMedia,
                         onMedia = viewModel::enterMediaFullscreen,
+                        casting = viewModel.isCasting,
+                        castingTo = viewModel.castState.deviceName,
                         onTabs = { viewModel.showOverlay(Overlay.TABS) },
                         onMenu = { menuOpen = true },
                         onSwipeTab = { direction -> viewModel.stepTab(direction) },
@@ -322,6 +327,10 @@ fun BrowserScreen(
                 onSeek = viewModel::seekMedia,
                 onJumpToLive = viewModel::jumpToLiveEdge,
                 onVolume = viewModel::setMediaVolume,
+                canCast = viewModel.canOfferCast,
+                castingTo = viewModel.castState.takeIf { it.isActive }?.deviceName.orEmpty(),
+                onCast = viewModel::openCastPicker,
+                onStopCast = viewModel::stopCasting,
             )
         }
 
@@ -345,6 +354,19 @@ fun BrowserScreen(
                 onSeek = viewModel::seekMedia,
                 onJumpToLive = viewModel::jumpToLiveEdge,
                 onVolume = viewModel::setMediaVolume,
+                canCast = viewModel.canOfferCast,
+                castingTo = viewModel.castState.takeIf { it.isActive }?.deviceName.orEmpty(),
+                onCast = viewModel::openCastPicker,
+                onStopCast = viewModel::stopCasting,
+            )
+        }
+
+        // ---- Casting ---------------------------------------------------------
+        if (viewModel.castPickerOpen) {
+            CastPickerSheet(
+                devices = viewModel.castState.devices,
+                onPick = viewModel::connectCast,
+                onDismiss = viewModel::closeCastPicker,
             )
         }
 

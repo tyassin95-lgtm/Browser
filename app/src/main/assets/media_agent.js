@@ -79,6 +79,8 @@
   var TIER_AUDIBLE = 7e8;
   var TIER_LIVE = 5e8;
   var TIER_READY = 1e6;
+  /** Below every video tier: audio is the fallback for a page that has no picture at all. */
+  var TIER_AUDIO = 1e3;
 
   /** A video the page has hidden is a decoy, however large its box claims to be. */
   function isPainted(el) {
@@ -116,6 +118,22 @@
       var s = score(v);
       if (s > bestScore) { bestScore = s; best = v; }
     });
+    if (best) return { el: best, score: bestScore };
+
+    /*
+     * Nothing visual qualified, so an audio element that is genuinely playing counts.
+     *
+     * Scored below every video tier on purpose: this is the fallback for a page whose media is
+     * a podcast or a radio stream, not a way for a stray `<audio>` to outrank the video the
+     * viewer is watching. It is reported and can be controlled and cast; it is never taken
+     * fullscreen, because there is nothing to show.
+     */
+    each(document.querySelectorAll('audio'), function (a) {
+      if (a.paused || a.ended) return;
+      if (a.muted || (typeof a.volume === 'number' && a.volume === 0)) return;
+      if (!a.currentSrc && !a.src) return;
+      if (bestScore < TIER_AUDIO) { bestScore = TIER_AUDIO; best = a; }
+    });
     return best ? { el: best, score: bestScore } : null;
   }
 
@@ -145,13 +163,40 @@
     } catch (e) { return null; }
   }
 
+  /**
+   * Where the media actually comes from, as far as anything outside the page could use it.
+   *
+   * `currentSrc` is the resolved absolute address the element settled on, which is what a
+   * receiver would have to fetch. A source assembled by Media Source Extensions reports a
+   * `blob:` address that means nothing outside this document, and an element with `mediaKeys`
+   * is decrypting as it plays — both are reported as they are so the browser can say why they
+   * cannot be sent elsewhere, rather than sending something that fails on the far end.
+   */
+  function sourceOf(v) {
+    var src = '';
+    try { src = v.currentSrc || v.src || ''; } catch (e) { src = ''; }
+    var mse = src.lastIndexOf('blob:', 0) === 0 || src.lastIndexOf('data:', 0) === 0;
+    var drm = false;
+    try { drm = !!v.mediaKeys; } catch (e) { drm = false; }
+    var poster = '';
+    try { poster = (v.tagName === 'VIDEO' && v.poster) || ''; } catch (e) { poster = ''; }
+    return { src: src, mse: !!mse, drm: !!drm, poster: poster };
+  }
+
   function describe(v) {
     var duration = typeof v.duration === 'number' ? v.duration : NaN;
     var live = duration === Infinity || (isNaN(duration) && v.readyState > 0 && !v.paused);
     var window = seekableWindow(v);
+    var source = sourceOf(v);
     return {
       w: v.videoWidth || 0,
       h: v.videoHeight || 0,
+      audioOnly: v.tagName === 'AUDIO',
+      src: source.src,
+      mse: source.mse,
+      drm: source.drm,
+      poster: source.poster,
+      title: (function () { try { return document.title || ''; } catch (e) { return ''; } })(),
       live: !!live,
       playing: !v.paused && !v.ended,
       muted: !!v.muted,
@@ -399,6 +444,19 @@
     var local = bestLocal();
     if (!local) { cleanup(); return false; }
 
+    /*
+     * An audio element is still worth tracking and controlling — and casting — but there is
+     * nothing to put on the screen, so fullscreen is declined rather than faked. The browser
+     * keeps its transport and its cast button; it just does not black out the page.
+     */
+    if (!isVisual(local.el)) {
+      activeVideo = local.el;
+      cleanup();
+      activeVideo = local.el;
+      reportProgressNow();
+      return false;
+    }
+
     activeVideo = local.el;
     activeCanvas = companionCanvas(activeVideo);
 
@@ -461,6 +519,9 @@
   // ------------------------------------------------------------- commands
 
   /** Commands act on whichever frame owns the video, so they follow the same route as `enter`. */
+  /** Nothing to maximise: an audio element has no frame to put on the screen. */
+  function isVisual(el) { return !!el && el.tagName !== 'AUDIO'; }
+
   function apply(type, arg) {
     if (routeChild && routeChild.isConnected) {
       post(routeChild.contentWindow, { ns: NS, type: 'cmd', cmd: type, arg: arg });
@@ -470,6 +531,10 @@
     if (!v) return;
     try {
       if (type === 'playPause') { if (v.paused) v.play(); else v.pause(); }
+      // Explicit rather than a toggle: handing playback to a receiver and taking it back are
+      // both states the browser knows it wants, and a toggle would race the page's own.
+      else if (type === 'play') { if (v.paused) v.play(); }
+      else if (type === 'pause') { if (!v.paused) v.pause(); }
       else if (type === 'mute') { v.muted = !v.muted; }
       else if (type === 'seek') { seekTo(v, parseFloat(arg)); }
       else if (type === 'volume') {
@@ -539,6 +604,14 @@
       d: info ? info.d || 0 : 0,
       ss: info ? info.ss || 0 : 0,
       se: info ? info.se || 0 : 0,
+      // Where the media actually is, so the browser can work out whether anything else could
+      // fetch it. Carried across frame boundaries with the rest of the report.
+      audioOnly: !!(info && info.audioOnly),
+      src: (info && info.src) || '',
+      mse: !!(info && info.mse),
+      drm: !!(info && info.drm),
+      poster: (info && info.poster) || '',
+      title: (info && info.title) || '',
       fullscreen: active
     };
     toBrowser({ type: 'report', state: state });

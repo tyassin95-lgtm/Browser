@@ -3,6 +3,10 @@
 # Kotlin and needs no reflective surface kept alive. If that rule ever comes back, so has the
 # attack surface it protects.
 
+# Play Services instantiates the cast options provider by the name in the manifest; without
+# this the release build loses casting entirely and says nothing about it.
+-keep class com.slate.browser.cast.SlateCastOptionsProvider { *; }
+
 # Room generated implementations are resolved reflectively by name.
 -keep class * extends androidx.room.RoomDatabase { <init>(); }
 -keep @androidx.room.Entity class * { *; }
