@@ -329,6 +329,10 @@ fun BrowserScreen(
                 onVolume = viewModel::setMediaVolume,
                 canCast = viewModel.canOfferCast,
                 castingTo = viewModel.castState.takeIf { it.isActive }?.deviceName.orEmpty(),
+                // The surface goes flat only while a receiver is actually rendering: a session
+                // that exists but has nothing loaded still shows the page's own video.
+                castStatus = viewModel.castState.takeIf { it.isPlayingRemotely }?.summary.orEmpty(),
+                castBusy = viewModel.castState.isBusy,
                 onCast = viewModel::openCastPicker,
                 onStopCast = viewModel::stopCasting,
             )
@@ -356,6 +360,10 @@ fun BrowserScreen(
                 onVolume = viewModel::setMediaVolume,
                 canCast = viewModel.canOfferCast,
                 castingTo = viewModel.castState.takeIf { it.isActive }?.deviceName.orEmpty(),
+                // The surface goes flat only while a receiver is actually rendering: a session
+                // that exists but has nothing loaded still shows the page's own video.
+                castStatus = viewModel.castState.takeIf { it.isPlayingRemotely }?.summary.orEmpty(),
+                castBusy = viewModel.castState.isBusy,
                 onCast = viewModel::openCastPicker,
                 onStopCast = viewModel::stopCasting,
             )

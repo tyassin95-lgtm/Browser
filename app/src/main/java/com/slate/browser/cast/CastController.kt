@@ -20,7 +20,40 @@ import java.util.concurrent.Executors
 /** A receiver the browser can see, as the picker needs to show it. */
 data class CastDevice(val id: String, val name: String, val isSelected: Boolean)
 
-enum class CastStage { UNAVAILABLE, IDLE, CONNECTING, CONNECTED, LOADING, PLAYING, PAUSED, FAILED }
+/**
+ * Where a cast session actually is, as the receiver reports it rather than as the phone hoped.
+ *
+ * The distinction that matters is between the stages that mean "a receiver is rendering this
+ * media" (LOADING, BUFFERING, PLAYING, PAUSED) and the ones that do not. Everything in the
+ * browser — which end the transport drives, whether the page's video is allowed to play, what
+ * the toolbar shows — is derived from that, so a stage that lies puts the phone and the
+ * television out of step in a way no amount of UI can hide.
+ */
+enum class CastStage {
+    /** No casting on this device: no Play Services, and no renderer stack that came up. */
+    UNAVAILABLE,
+
+    /** Ready, with no session. */
+    IDLE,
+
+    /** A session is being established. */
+    CONNECTING,
+
+    /** A session exists and the receiver is idle — nothing loaded, or the media finished. */
+    CONNECTED,
+
+    /** The receiver has been given the media and has not started it yet. */
+    LOADING,
+
+    /** Playing, but waiting on the network for more of it. */
+    BUFFERING,
+
+    PLAYING,
+    PAUSED,
+
+    /** The attempt is over and there is no session: the message says why. */
+    FAILED,
+}
 
 /** Everything the UI needs to know about casting, in one value. */
 data class CastState(
@@ -35,15 +68,52 @@ data class CastState(
     val isLive: Boolean = false,
 ) {
     /** A session exists, whatever it is currently doing. */
-    val isActive: Boolean
-        get() = stage == CastStage.CONNECTING || stage == CastStage.CONNECTED ||
-            stage == CastStage.LOADING || stage == CastStage.PLAYING || stage == CastStage.PAUSED
+    val isActive: Boolean get() = stage in ACTIVE_STAGES
 
-    /** Media is loaded on the receiver and the transport should drive it rather than the page. */
-    val isPlayingRemotely: Boolean
-        get() = stage == CastStage.PLAYING || stage == CastStage.PAUSED || stage == CastStage.LOADING
+    /**
+     * The receiver owns the media.
+     *
+     * This is the single line that decides which end is playing: while it is true the page's
+     * video is held paused and every control drives the receiver, and while it is false the
+     * phone plays and the same controls drive the page. Nothing else in the browser is allowed
+     * a second opinion about it.
+     */
+    val isPlayingRemotely: Boolean get() = stage in RENDERING_STAGES
 
     val isPlaying: Boolean get() = stage == CastStage.PLAYING
+
+    /** Waiting on the receiver rather than on the viewer. */
+    val isBusy: Boolean get() = stage == CastStage.LOADING || stage == CastStage.BUFFERING
+
+    /**
+     * Whether the transport should show a pause button.
+     *
+     * Buffering and loading both mean the receiver is on its way to playing — the media is
+     * loaded with autoplay — so a play button there would invite a viewer to press it and stop
+     * the thing that was already starting.
+     */
+    val looksPlaying: Boolean
+        get() = stage == CastStage.PLAYING || stage == CastStage.BUFFERING || stage == CastStage.LOADING
+
+    /**
+     * A session that is trying to come back rather than one that has gone.
+     *
+     * The phone holds its media paused through this: a receiver that lost its network for two
+     * seconds has not handed playback back, and starting the video on the phone in the gap —
+     * then stopping it again when the session returns — is worse than a pause nobody sees.
+     */
+    val isReconnecting: Boolean get() = stage == CastStage.CONNECTING
+
+    /** One line for the banner, describing the session rather than the media. */
+    val summary: String
+        get() = when (stage) {
+            CastStage.CONNECTING -> "Connecting to ${deviceName.ifBlank { "the device" }}…"
+            CastStage.CONNECTED -> "Ready on ${deviceName.ifBlank { "the device" }}"
+            CastStage.LOADING -> "Sending to ${deviceName.ifBlank { "the device" }}…"
+            CastStage.BUFFERING -> "Buffering on ${deviceName.ifBlank { "the device" }}…"
+            CastStage.PLAYING, CastStage.PAUSED -> "Playing on ${deviceName.ifBlank { "the device" }}"
+            else -> message
+        }
 
     /**
      * Whether the browser can offer to cast at all.
@@ -55,6 +125,16 @@ data class CastState(
      * arrangement — an empty list is an answer.
      */
     val canOffer: Boolean get() = stage != CastStage.UNAVAILABLE
+
+    private companion object {
+        val ACTIVE_STAGES = setOf(
+            CastStage.CONNECTING, CastStage.CONNECTED, CastStage.LOADING,
+            CastStage.BUFFERING, CastStage.PLAYING, CastStage.PAUSED,
+        )
+        val RENDERING_STAGES = setOf(
+            CastStage.LOADING, CastStage.BUFFERING, CastStage.PLAYING, CastStage.PAUSED,
+        )
+    }
 }
 
 /**
@@ -93,12 +173,6 @@ class CastController(context: Context) {
 
     /** Called on the main thread whenever [state] changes. */
     var onStateChanged: (CastState) -> Unit = {}
-
-    /**
-     * Called when a session ends with the position the receiver had reached, so playback can be
-     * picked up on the phone where the television left it.
-     */
-    var onHandBack: (positionMs: Long) -> Unit = {}
 
     // ---- Availability -------------------------------------------------------
 
@@ -224,8 +298,35 @@ class CastController(context: Context) {
         runCatching { castContext?.sessionManager?.endCurrentSession(stopReceiver) }
         runCatching { router?.unselect(MediaRouter.UNSELECT_REASON_STOPPED) }
         releaseSession()
-        update { CastState(stage = CastStage.IDLE, devices = it.devices) }
-        if (position > 0) main.post { onHandBack(position) }
+        // The position rides out on the state itself rather than through a second callback.
+        // Where the receiver got to is part of what the session was, and one channel cannot
+        // arrive out of order with itself.
+        update { CastState(stage = CastStage.IDLE, devices = it.devices, positionMs = position) }
+    }
+
+    /**
+     * Ends the session and leaves the reason on screen.
+     *
+     * Every failure path goes through here, because the alternative — reporting a failure and
+     * leaving the session standing — is what makes a browser claim to be casting when there is
+     * nothing on the other end. There is no stage that means "failed but still connected".
+     */
+    private fun fail(message: String) {
+        val position = currentPosition()
+        runCatching { castContext?.sessionManager?.endCurrentSession(true) }
+        runCatching { router?.unselect(MediaRouter.UNSELECT_REASON_STOPPED) }
+        releaseSession()
+        update {
+            CastState(
+                stage = CastStage.FAILED,
+                devices = it.devices,
+                message = message,
+                // A failure is still a hand-back: whatever the receiver managed to play is
+                // where the phone should pick the video up.
+                positionMs = position,
+            )
+        }
+        refreshDevices()
     }
 
     private val sessionListener = object : SessionManagerListener<CastSession> {
@@ -236,13 +337,7 @@ class CastController(context: Context) {
         override fun onSessionStarted(session: CastSession, sessionId: String) = adopt(session)
 
         override fun onSessionStartFailed(session: CastSession, error: Int) {
-            releaseSession()
-            update {
-                it.copy(
-                    stage = CastStage.FAILED,
-                    message = "Couldn't connect to ${nameOf(session)}.",
-                )
-            }
+            fail("Couldn't connect to ${nameOf(session)}.")
         }
 
         override fun onSessionResuming(session: CastSession, sessionId: String) {
@@ -252,8 +347,7 @@ class CastController(context: Context) {
         override fun onSessionResumed(session: CastSession, wasSuspended: Boolean) = adopt(session)
 
         override fun onSessionResumeFailed(session: CastSession, error: Int) {
-            releaseSession()
-            update { it.copy(stage = CastStage.FAILED, message = "Lost the connection to the device.") }
+            fail("Lost the connection to ${nameOf(session)}.")
         }
 
         override fun onSessionSuspended(session: CastSession, reason: Int) {
@@ -267,8 +361,7 @@ class CastController(context: Context) {
         override fun onSessionEnded(session: CastSession, error: Int) {
             val position = currentPosition()
             releaseSession()
-            update { CastState(stage = CastStage.IDLE, devices = it.devices) }
-            if (position > 0) main.post { onHandBack(position) }
+            update { CastState(stage = CastStage.IDLE, devices = it.devices, positionMs = position) }
         }
     }
 
@@ -337,17 +430,13 @@ class CastController(context: Context) {
             .getOrNull()
             ?.setResultCallback { result ->
                 if (!result.status.isSuccess) {
-                    // The receiver could not play it: a codec it lacks, a fetch it could not
-                    // make. Its own words are more useful than a generic failure.
-                    update {
-                        it.copy(
-                            stage = CastStage.FAILED,
-                            message = "${state.deviceName.ifBlank { "The device" }} couldn't play this video.",
-                        )
-                    }
+                    // The receiver would not take it: a codec it lacks, a fetch it could not
+                    // make. The session is ended rather than left standing, because a session
+                    // with nothing in it is exactly what "still says connected" looks like.
+                    fail("${state.deviceName.ifBlank { "The device" }} couldn't play this video.")
                 }
             }
-            ?: update { it.copy(stage = CastStage.FAILED, message = "Couldn't send this video.") }
+            ?: fail("Couldn't send this video.")
     }
 
     fun play() = withClient { it.play() }
@@ -398,15 +487,26 @@ class CastController(context: Context) {
         override fun onQueueStatusUpdated() = syncFromRemote()
     }
 
+    /**
+     * The receiver's status, which is the only account of what is playing that counts.
+     *
+     * The idle reason is the important half and the easy one to throw away. A receiver goes
+     * idle when the video ends, when somebody stops it with the television's own remote, and
+     * when it fails — three different things, and reporting all of them as "connected" is why a
+     * browser goes on showing a cast session that no longer exists.
+     */
     private fun syncFromRemote() {
         val client = session?.remoteMediaClient ?: return
         val playerState = runCatching { client.playerState }.getOrDefault(MediaStatus.PLAYER_STATE_UNKNOWN)
+        if (playerState == MediaStatus.PLAYER_STATE_IDLE) {
+            handleIdle(runCatching { client.idleReason }.getOrDefault(MediaStatus.IDLE_REASON_NONE))
+            return
+        }
         val stage = when (playerState) {
             MediaStatus.PLAYER_STATE_PLAYING -> CastStage.PLAYING
             MediaStatus.PLAYER_STATE_PAUSED -> CastStage.PAUSED
-            MediaStatus.PLAYER_STATE_BUFFERING, MediaStatus.PLAYER_STATE_LOADING -> CastStage.LOADING
-            // Idle, whether because nothing has been loaded yet or because the receiver
-            // reached the end: connected either way, with the transport showing no progress.
+            MediaStatus.PLAYER_STATE_BUFFERING -> CastStage.BUFFERING
+            MediaStatus.PLAYER_STATE_LOADING -> CastStage.LOADING
             else -> CastStage.CONNECTED
         }
         val volume = runCatching { session?.volume?.toFloat() }.getOrNull() ?: state.volume
@@ -419,6 +519,38 @@ class CastController(context: Context) {
                 volume = volume,
                 isMuted = muted,
             )
+        }
+    }
+
+    /**
+     * What an idle receiver means, which depends entirely on why it went idle.
+     *
+     * Someone stopping the video on the television is a decision, and the browser honours it by
+     * ending the session and taking playback back — not by sitting on a connection to a device
+     * that is showing its home screen.
+     */
+    private fun handleIdle(reason: Int) {
+        // A receiver is idle between being handed the media and starting it, and that gap is
+        // not the video ending. While a load is outstanding, idleness says nothing.
+        val awaitingLoad = state.stage == CastStage.LOADING && loaded != null
+        when (reason) {
+            MediaStatus.IDLE_REASON_FINISHED ->
+                // Played to the end. The session is still good — another video can be sent to
+                // it — but nothing is rendering, so the phone takes its controls back. The
+                // position is cleared deliberately: a hand-back with nowhere to resume from is
+                // how the phone knows not to start playing the video again by itself.
+                update { it.copy(stage = CastStage.CONNECTED, positionMs = 0) }
+
+            MediaStatus.IDLE_REASON_CANCELED ->
+                // Stopped on the television itself. Ending the session here is what makes the
+                // phone agree with the room.
+                disconnect(stopReceiver = false)
+
+            MediaStatus.IDLE_REASON_ERROR ->
+                fail("${state.deviceName.ifBlank { "The device" }} couldn't play this video.")
+
+            // Nothing loaded yet, or a load replacing what was there: a fresh session, not an end.
+            else -> if (!awaitingLoad) update { it.copy(stage = CastStage.CONNECTED) }
         }
     }
 

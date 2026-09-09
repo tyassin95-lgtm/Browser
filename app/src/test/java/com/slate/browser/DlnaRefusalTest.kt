@@ -2,10 +2,13 @@ package com.slate.browser
 
 import androidx.test.core.app.ApplicationProvider
 import com.slate.browser.cast.CastSource
+import com.slate.browser.cast.CastStage
 import com.slate.browser.cast.DlnaController
 import com.slate.browser.cast.StreamFormat
 import com.slate.browser.cast.dlna.SoapResult
 import com.slate.browser.cast.dlna.UpnpFault
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -75,5 +78,19 @@ class DlnaRefusalTest {
             SoapResult.Unreachable,
         )
         assertTrue(message, message.contains("stopped answering"))
+    }
+
+    @Test
+    fun `a renderer's own words decide what the browser shows`() {
+        // The specification fixes this vocabulary, and it is the only account of what the
+        // television is doing that is worth having.
+        assertEquals(CastStage.PLAYING, controller.stageFor("PLAYING"))
+        assertEquals(CastStage.PAUSED, controller.stageFor("PAUSED_PLAYBACK"))
+        assertEquals(CastStage.BUFFERING, controller.stageFor("TRANSITIONING"))
+        // A stop is not a stage: it ends the session rather than becoming a label, and that is
+        // decided where the polling can tell a genuine stop from the moment before playback
+        // starts.
+        assertNull(controller.stageFor("STOPPED"))
+        assertNull(controller.stageFor("NO_MEDIA_PRESENT"))
     }
 }

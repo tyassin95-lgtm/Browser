@@ -28,6 +28,7 @@ function api(command) {
     seekTo: (ms) => command('seek', ms / 1000),
     togglePlayback: () => command('playPause'),
     setVolume: (v) => command('volume', v),
+    setRemote: (on) => command('remote', on ? '1' : '0'),
   };
 }
 
@@ -107,6 +108,42 @@ const MSE = `
 
   const report = events.reports[events.reports.length - 1];
   check('the transport is told the duration', report && Math.round(report.d) === 30, report ? `d=${report.d}` : 'no report');
+
+  // ---- The handoff to a receiver --------------------------------------------------
+  // A real player, in a real browser engine, arguing with the browser about who is playing.
+  await agent.setRemote(true);
+  await delay(400);
+  const handedOver = await page.evaluate(VISIBLE_SECOND);
+  await delay(1200);
+  const stayedStopped = await page.evaluate(VISIBLE_SECOND);
+  check(
+    'handing over to a receiver stops the picture here',
+    handedOver === stayedStopped,
+    `second ${handedOver} then ${stayedStopped}`,
+  );
+  check(
+    'and silences it, so the room does not hear both',
+    await page.evaluate("document.querySelector('video').muted === true"),
+    'muted',
+  );
+
+  // The page fights back, the way every real player does.
+  await page.evaluate("document.querySelector('video').play()");
+  await delay(900);
+  const stillHeld = await page.evaluate("document.querySelector('video').paused === true");
+  check("the page's own play() cannot take the video back", stillHeld, 'still paused');
+
+  await agent.setRemote(false);
+  await agent.seekTo(12000);
+  await delay(300);
+  await page.evaluate("document.querySelector('video').play()");
+  await delay(1200);
+  const afterHandBack = await page.evaluate(VISIBLE_SECOND);
+  check(
+    'taking playback back resumes where the receiver had got to',
+    afterHandBack >= 12 && afterHandBack <= 15,
+    `visible second ${afterHandBack}, handed back at 12`,
+  );
 
   await agent.exitFullscreen();
   await delay(300);

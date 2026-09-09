@@ -555,6 +555,63 @@ test('an absolute seek moves the video', async () => {
   assert.strictEqual(at(), 120);
 });
 
+
+// ------------------------------------------------------------- remote mode
+
+test('remote mode stops the page playing the video', async () => {
+  const { win, doc } = createPage('<video id="v"></video>');
+  const v = describeVideo(doc.getElementById('v'), { width: 1280, height: 720, paused: false });
+
+  win.__slateMedia.command('remote', '1');
+  await delay(40);
+
+  assert.strictEqual(v.paused, true, 'the receiver has the media, so this must not be playing');
+  assert.strictEqual(v.muted, true, 'and it must be silent, so the room does not hear both');
+});
+
+test("a player's own script cannot start the video again while a receiver has it", async () => {
+  // This is the whole reason remote mode exists rather than a pause. Every serious player calls
+  // play() again after something it did not do, and a single pause loses that argument.
+  const { win, doc } = createPage('<video id="v"></video>');
+  const v = describeVideo(doc.getElementById('v'), { width: 1280, height: 720, paused: false });
+
+  win.__slateMedia.command('remote', '1');
+  await delay(40);
+  v.play();
+  await delay(40);
+
+  assert.strictEqual(v.paused, true, 'the guard must put it back');
+});
+
+test('leaving remote mode gives the page its video back, unmuted', async () => {
+  const { win, doc } = createPage('<video id="v"></video>');
+  const v = describeVideo(doc.getElementById('v'), { width: 1280, height: 720, paused: false });
+  v.muted = false;
+
+  win.__slateMedia.command('remote', '1');
+  await delay(40);
+  win.__slateMedia.command('remote', '0');
+  await delay(40);
+  win.__slateMedia.command('play');
+  await delay(40);
+
+  assert.strictEqual(v.paused, false, 'the phone is the player again');
+  assert.strictEqual(v.muted, false, 'and it is audible again');
+});
+
+test('remote mode reaches a video inside a frame', async () => {
+  // The element that has to be silenced is usually in an embedded player, and the top frame
+  // cannot see into it.
+  const page = createPage('<div id="wrap"></div>');
+  const frame = addFrame(page, '<video id="inner"></video>');
+  const v = describeVideo(frame.doc.getElementById('inner'), { width: 1280, height: 720, paused: false });
+
+  page.win.__slateMedia.command('remote', '1');
+  await delay(60);
+
+  assert.strictEqual(v.paused, true, 'a frame is not a hiding place from the handoff');
+});
+
 // ------------------------------------------------------------------- runner
 
 (async () => {

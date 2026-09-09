@@ -72,4 +72,46 @@ class CastStateTest {
     }
 
     private fun device() = CastDevice(id = "route-1", name = "Living Room TV", isSelected = false)
+
+    @Test
+    fun `buffering is the receiver playing, not the session ending`() {
+        // Anything that reads buffering as "not rendering" hands playback back to the phone
+        // every time the network hesitates, and the room hears both.
+        val buffering = CastState(stage = CastStage.BUFFERING, deviceName = "Living Room")
+        assertTrue(buffering.isActive)
+        assertTrue("the page must stay pinned while the receiver buffers", buffering.isPlayingRemotely)
+        assertTrue("the button must offer to pause, not to start it again", buffering.looksPlaying)
+        assertTrue(buffering.isBusy)
+    }
+
+    @Test
+    fun `a failed session is not a session`() {
+        val failed = CastState(stage = CastStage.FAILED, deviceName = "Living Room", message = "No")
+        assertFalse("nothing may claim to be casting after a failure", failed.isActive)
+        assertFalse(failed.isPlayingRemotely)
+        assertTrue("the button must still be offered", failed.canOffer)
+    }
+
+    @Test
+    fun `a reconnecting session has not handed anything back`() {
+        val reconnecting = CastState(stage = CastStage.CONNECTING, deviceName = "Living Room")
+        assertTrue(reconnecting.isReconnecting)
+        assertFalse(reconnecting.isPlayingRemotely)
+    }
+
+    @Test
+    fun `the banner says what the session is doing, not what the video is`() {
+        assertEquals(
+            "Buffering on Living Room…",
+            CastState(stage = CastStage.BUFFERING, deviceName = "Living Room").summary,
+        )
+        assertEquals(
+            "Playing on Living Room",
+            CastState(stage = CastStage.PLAYING, deviceName = "Living Room").summary,
+        )
+        assertEquals(
+            "Connecting to Living Room…",
+            CastState(stage = CastStage.CONNECTING, deviceName = "Living Room").summary,
+        )
+    }
 }

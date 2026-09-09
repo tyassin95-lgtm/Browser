@@ -61,8 +61,17 @@ function describeVideo(v, spec) {
   define(v, 'ended', false);
   define(v, 'readyState', spec.readyState !== undefined ? spec.readyState : 4);
   define(v, 'duration', spec.live ? Infinity : (spec.duration || 120));
-  v.play = function () { define(v, 'paused', false); return Promise.resolve(); };
-  v.pause = function () { define(v, 'paused', true); };
+  // Events, not just a flag: a real element tells the page it started, and code that reacts to
+  // that — the agent's remote-mode guard among it — only exists because browsers do this.
+  v.play = function () {
+    define(v, 'paused', false);
+    v.dispatchEvent(new v.ownerDocument.defaultView.Event('play'));
+    return Promise.resolve();
+  };
+  v.pause = function () {
+    define(v, 'paused', true);
+    v.dispatchEvent(new v.ownerDocument.defaultView.Event('pause'));
+  };
   return v;
 }
 

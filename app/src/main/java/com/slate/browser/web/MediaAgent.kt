@@ -144,6 +144,17 @@ class MediaAgent(context: Context) {
     fun seekTo(webView: WebView, positionMs: Long) =
         command(webView, "seek", (positionMs / 1000.0).toString())
 
+    /**
+     * Hands rendering to a receiver, or takes it back.
+     *
+     * Not a pause. A pause is a request, and a player's own script answers it a second later by
+     * starting again — which is how a phone and a television end up playing the same video into
+     * the same room. Remote mode pauses the element, silences it, and holds it paused for as
+     * long as the receiver has the media.
+     */
+    fun setRemote(webView: WebView, remote: Boolean) =
+        command(webView, "remote", if (remote) "1" else "0")
+
     fun setVolume(webView: WebView, volume: Float) =
         command(webView, "volume", volume.coerceIn(0f, 1f).toString())
 

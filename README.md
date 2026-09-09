@@ -296,12 +296,43 @@ Both protocols feed one picker. Devices are pooled and de-duplicated, whichever 
 them; the session belongs to whichever one is connected; and if a protocol is unavailable on
 the device the other simply carries the list.
 
-The transport does not change. While a receiver has the media, its position, duration and
-playback state are merged over the page's report and the same buttons drive the receiver
-instead of the video element — one set of controls, two backends, rather than a second player
-that behaves differently. Leaving fullscreen, rotating the phone and switching tabs all leave
-the session alone; the toolbar's media button becomes the sign that casting is happening and
-the way back to the controls.
+**The phone becomes the remote.** While a receiver has the media, the television is the player
+and the phone is the thing you hold. The page's video is not merely paused — a pause is a
+request, and every serious player answers it a second later by calling `play()` again, which is
+how a phone and a television end up half a second apart in the same room. The element is pinned:
+paused, muted, and pushed back to paused by a listener on its own play event, in every frame,
+across a navigation, for exactly as long as the receiver has the media. The browser's own
+surface goes flat, with the receiver's name on it, because a paused frame of somebody's film
+with a play button over it reads as "the phone is the player" at the moment it has stopped being
+one.
+
+The transport is the same transport. Position, duration and playback state come from the
+receiver and the same buttons drive it — one set of controls, two backends, rather than a second
+player that behaves differently. Releasing the seek bar is a real seek on the television; the
+elapsed time is the television's own; the volume slider moves the television's volume, with only
+the newest value sent, because a slider produces one value per frame and each one is a round trip
+to a set that will otherwise stop answering. Leaving fullscreen, rotating the phone and switching
+tabs all leave the session alone.
+
+**One source of truth, and it is the receiver.** Every stage the browser shows —  connecting,
+connected, loading, buffering, playing, paused, failed — is what the receiver last said, not what
+the browser hoped when it asked. Cast reports through its session and media callbacks, and the
+idle reason is the half that matters: a video ending, somebody stopping it with the television's
+own remote, and a receiver failing are three different things, and calling all of them
+"connected" is how a browser goes on showing a session that no longer exists. DLNA has no session
+to report, so it is polled — transport state as well as position, because position alone cannot
+tell you the set was switched off. A stop that persists ends the session; three seconds of
+silence is a television that has gone. Connecting to a DLNA renderer asks it a question first,
+since the protocol is stateless and declaring success on a tap is exactly how a browser claims to
+be connected to a set that was unplugged an hour ago.
+
+Failure has one shape: no session, a reason on screen, and playback back on the phone at the
+position the receiver reached. There is no stage that means "failed but still connected".
+
+**Coming back.** Ending a session — deliberately, or because the television did — releases the
+page, seeks it to where the receiver got to, and plays. A video that simply finished hands back
+no position, and that is how the phone knows not to start playing it again by itself. Nothing is
+reloaded.
 
 **Finding an address to send.** Almost no video site hands a `<video>` element a URL any more:
 hls.js, dash.js and Shaka all feed a MediaSource, so `currentSrc` is a `blob:` that exists
@@ -339,10 +370,15 @@ stream and fetches no playlist has nothing to hand over. Each is refused with th
 reason, and the refusal opens the picker rather than closing it: every one of those sentences
 ends at screen mirroring, and a message that dismisses itself is a message that shuts the only
 working door. What survives is then *asked the question the receiver will ask*: one anonymous ranged
-request from this device, no cookies, short timeout. A stream that plays here because the user
-is signed in answers a stranger with a 403, or — more often, and more quietly — with a sign-in
-page carrying a perfectly successful status code. Both become a sentence before a session is
-started rather than a television showing nothing.
+request from this device, no cookies, short timeout, and — the part the first version got wrong
+— a user agent, because a probe less capable than the receiver condemns media the receiver could
+have played. Content delivery networks refuse an unnamed client as a matter of course; that is
+hotlink protection, not authentication, and reporting it as "this video needs you to be signed
+in" is a lie about a video that has no sign-in. Now a challenge means sign-in, a bare refusal
+means the site serves this address to the page it came from and nowhere else, a redirect is
+followed rather than read as the answer, and anything inconclusive — a timeout, a server having a
+bad moment — is not treated as evidence at all: the receiver is asked, and its own answer is what
+gets reported.
 
 Nothing is downloaded and re-uploaded: the receiver is given the address and fetches the
 original, so the quality is whatever the source serves. Ending a session brings playback back

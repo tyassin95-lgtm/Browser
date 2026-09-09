@@ -656,7 +656,7 @@ class BrowserViewModel @JvmOverloads constructor(
             val remote = castState
             if (!remote.isPlayingRemotely) return page
             return page.copy(
-                isPlaying = remote.isPlaying,
+                isPlaying = remote.looksPlaying,
                 positionMs = remote.positionMs,
                 durationMs = if (remote.durationMs > 0) remote.durationMs else page.durationMs,
                 volume = remote.volume,
@@ -734,7 +734,9 @@ class BrowserViewModel @JvmOverloads constructor(
 
     fun toggleMediaPlayback() {
         if (castState.isPlayingRemotely) {
-            if (castState.isPlaying) cast?.pause() else cast?.play()
+            // What the button is showing, so pressing it does what it says rather than what a
+            // half-second-old status update thought.
+            if (castState.looksPlaying) cast?.pause() else cast?.play()
             return
         }
         activeTab?.webView?.let { mediaAgent.togglePlayback(it) }
@@ -896,23 +898,28 @@ class BrowserViewModel @JvmOverloads constructor(
                     rangedRequest = source.format == StreamFormat.PROGRESSIVE,
                 )
             }
+            // A refusal here has to be worth the words. Only an answer that actually settles
+            // the question stops the attempt: an inconclusive probe — a timeout, a server
+            // error, a route that behaves differently from this device — is not evidence about
+            // what a television on its own connection would get, and refusing on it is how a
+            // browser ends up declining media that would have played perfectly well. When the
+            // probe cannot tell, the receiver is asked and its own answer is reported.
             val refusal = when (reachable) {
                 is CastPreflight.Result.NeedsSignIn ->
-                    "This video needs you to be signed in, so the TV can't fetch it."
+                    "This video needs you to be signed in, and the TV can't sign in for you."
+                is CastPreflight.Result.Forbidden ->
+                    "This site only serves this video to the page it came from, so a TV can't " +
+                        "fetch it. Screen mirroring will show it."
                 is CastPreflight.Result.NotMedia ->
-                    "That address doesn't lead to a video the TV can play."
-                is CastPreflight.Result.Unreachable ->
-                    "The TV wouldn't be able to reach this video."
-                is CastPreflight.Result.Reachable -> null
+                    "That address answers with a web page rather than a video."
+                is CastPreflight.Result.Missing ->
+                    "That video's address has expired."
+                is CastPreflight.Result.Inconclusive, is CastPreflight.Result.Reachable -> null
             }
-            if (refusal != null) {
-                controller.disconnect()
-                snack(refusal)
-                return@launch
-            }
-            // The phone stops so the room is not hearing both. Its position is where the
-            // receiver picks up.
-            activeTab?.webView?.let { mediaAgent.pause(it) }
+            // The phone stops rendering. Not a pause that a player's own script can undo a
+            // second later — the page is put into remote mode and held there for as long as
+            // the receiver has the media.
+            enterRemotePlayback()
             controller.load(verdict, startAt)
         }
     }
@@ -923,38 +930,108 @@ class BrowserViewModel @JvmOverloads constructor(
         cast?.disconnect()
     }
 
-    private fun resumeOnPhone(positionMs: Long) {
-        val webView = activeTab?.webView ?: return
-        if (positionMs > 0 && !media.isLive) mediaAgent.seekTo(webView, positionMs)
+    // ---- The handoff -------------------------------------------------------
+
+    /**
+     * Which end is rendering, and the only thing that decides it.
+     *
+     * `castState.isPlayingRemotely` is the source of truth; this is the browser's record of
+     * having *acted* on it, so the two transitions each happen exactly once. Everything else —
+     * the page being held paused, the controls being pointed at the receiver, the banner — is
+     * downstream of these two calls rather than a second opinion about the same question.
+     */
+    private var playingRemotely = false
+
+    /**
+     * Which tab had its player handed over.
+     *
+     * Not "whichever tab is in front now": a viewer is free to open another tab while the
+     * television plays, and releasing the wrong page would leave the cast tab silenced for the
+     * rest of its life while the new one is pinned for no reason.
+     */
+    private var remoteTabId: String? = null
+
+    /**
+     * The page stops rendering.
+     *
+     * A single pause is not enough and never was: a player whose own script calls `play()` a
+     * moment later leaves two copies of the video running in the same room, which is exactly
+     * what the browser was doing. Remote mode pauses the element, mutes it, and holds it there
+     * against the page's own attempts to start it again.
+     */
+    private fun enterRemotePlayback() {
+        if (playingRemotely) return
+        val tab = activeTab ?: return
+        playingRemotely = true
+        remoteTabId = tab.id
+        tab.webView?.let { mediaAgent.setRemote(it, true) }
+    }
+
+    /**
+     * The page takes playback back, at the position the receiver reached.
+     *
+     * A position of zero means the receiver finished the video rather than handing it over
+     * mid-play, and finishing is not a reason to start it again on the phone — so the page is
+     * released and left where it is.
+     */
+    private fun leaveRemotePlayback(positionMs: Long) {
+        if (!playingRemotely) return
+        playingRemotely = false
+        val tab = tabManager.tabs.firstOrNull { it.id == remoteTabId }
+        remoteTabId = null
+        val webView = tab?.webView ?: return
+        mediaAgent.setRemote(webView, false)
+        if (positionMs <= 0) return
+        if (!media.isLive) mediaAgent.seekTo(webView, positionMs)
         mediaAgent.play(webView)
+    }
+
+
+
+    /**
+     * Everything that follows from the receiver changing its mind.
+     *
+     * The single place the browser reacts to a cast session, so that "what the receiver says"
+     * and "what the browser does about it" cannot drift apart: the handoff between the two
+     * players, the pending load, a failure's message, and whether discovery is still worth
+     * running. Nothing else observes the session directly.
+     */
+    private fun onCastState(next: CastState) {
+        val wasPlayingRemotely = castState.isPlayingRemotely
+        castState = next
+        // The one place the phone and the receiver swap roles. Driven by what the receiver
+        // reports rather than by what the browser asked for, so a session that ends on the
+        // television — stopped with its own remote, switched off, timed out — gives playback
+        // back here just as a deliberate disconnection does.
+        if (!wasPlayingRemotely && next.isPlayingRemotely) enterRemotePlayback()
+        // A session that is reconnecting has not given anything back yet, so the page stays
+        // pinned through the gap rather than playing for the two seconds it takes to return.
+        if (wasPlayingRemotely && !next.isPlayingRemotely && !next.isReconnecting) {
+            leaveRemotePlayback(next.positionMs)
+        }
+        if (castHandoffPending && next.stage == CastStage.CONNECTED) {
+            castHandoffPending = false
+            sendToReceiver()
+        }
+        if (next.stage == CastStage.FAILED) {
+            castHandoffPending = false
+            if (next.message.isNotBlank()) snack(next.message)
+        }
+        if (next.stage == CastStage.IDLE) castHandoffPending = false
+        updateCastDiscovery()
     }
 
     /**
      * Drives the cast state directly, for tests that need a receiver without one being nearby.
-     * The path is the same one the controller's callback uses.
+     * The path is the same one the controller's callback uses — deliberately, because what is
+     * worth testing is everything that path does, not the assignment at the start of it.
      */
-    internal fun applyCastStateForTest(state: CastState) {
-        castState = state
-    }
+    internal fun applyCastStateForTest(state: CastState) = onCastState(state)
 
     private fun attachCast(context: Context) {
         if (cast != null) return
         val controller = MediaReceivers(context.applicationContext)
-        controller.onStateChanged = { next ->
-            val wasPlayingRemotely = castState.isPlayingRemotely
-            castState = next
-            if (castHandoffPending && next.stage == CastStage.CONNECTED) {
-                castHandoffPending = false
-                sendToReceiver()
-            }
-            if (next.stage == CastStage.FAILED) {
-                castHandoffPending = false
-                if (next.message.isNotBlank()) snack(next.message)
-            }
-            if (next.stage == CastStage.IDLE) castHandoffPending = false
-            updateCastDiscovery()
-        }
-        controller.onHandBack = { position -> resumeOnPhone(position) }
+        controller.onStateChanged = { next -> onCastState(next) }
         controller.initialise()
         cast = controller
         updateCastDiscovery()
@@ -1276,6 +1353,12 @@ class BrowserViewModel @JvmOverloads constructor(
                 target.webView?.let { webView ->
                     mediaAgent.injectIntoMainFrame(webView)
                     desktopMode.reassert(webView, target.isDesktopMode)
+                    // A new document is a new agent with no memory of the handoff. Without
+                    // this, navigating while a receiver is playing starts the phone's copy
+                    // again and the room hears both.
+                    if (playingRemotely && target.id == remoteTabId) {
+                        mediaAgent.setRemote(webView, true)
+                    }
                 }
                 if (settings.value.saveHistory && target.errorMessage == null) {
                     viewModelScope.launch { repository.recordVisit(url, title) }

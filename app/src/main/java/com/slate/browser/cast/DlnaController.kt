@@ -35,11 +35,14 @@ class DlnaController(context: Context) {
     private var wantActive = false
     private var polling = false
 
+    /** The newest volume asked for while an earlier one is still on the wire. */
+    @Volatile private var pendingVolume: Float? = null
+    @Volatile private var volumeInFlight = false
+
     var state: CastState = CastState(stage = CastStage.IDLE)
         private set
 
     var onStateChanged: (CastState) -> Unit = {}
-    var onHandBack: (positionMs: Long) -> Unit = {}
 
     // ---- Discovery ----------------------------------------------------------
 
@@ -82,13 +85,42 @@ class DlnaController(context: Context) {
 
     // ---- Session ------------------------------------------------------------
 
+    /**
+     * Connects, which for UPnP means proving the renderer is really there.
+     *
+     * There is no session to establish — the protocol is stateless — so the temptation is to
+     * declare success the moment a device is picked. That is exactly how a browser ends up
+     * showing a connection to a television that was switched off ten minutes ago. Instead the
+     * renderer is asked a harmless question, and only an answer counts as connected.
+     */
     fun connect(deviceId: String) {
         val renderer = renderers.firstOrNull { DLNA_PREFIX + it.udn == deviceId } ?: run {
             update { it.copy(stage = CastStage.FAILED, message = "That device is no longer nearby.") }
             return
         }
-        connected = renderer
-        update { it.copy(stage = CastStage.CONNECTED, deviceName = renderer.name, message = "") }
+        update { it.copy(stage = CastStage.CONNECTING, deviceName = renderer.name, message = "") }
+        background.execute {
+            val reply = client.call(
+                renderer.avTransportUrl,
+                DlnaClient.AV_TRANSPORT,
+                "GetTransportInfo",
+                "<InstanceID>0</InstanceID>",
+            )
+            // A refusal still proves the device is there and listening; only silence does not.
+            if (reply is SoapResult.Unreachable) {
+                connected = null
+                update {
+                    CastState(
+                        stage = CastStage.FAILED,
+                        devices = it.devices,
+                        message = "${renderer.name} didn't answer.",
+                    )
+                }
+                return@execute
+            }
+            connected = renderer
+            update { it.copy(stage = CastStage.CONNECTED, deviceName = renderer.name, message = "") }
+        }
     }
 
     fun disconnect(): Long {
@@ -109,8 +141,7 @@ class DlnaController(context: Context) {
                 }
             }
         }
-        update { CastState(stage = CastStage.IDLE, devices = it.devices) }
-        if (position > 0) main.post { onHandBack(position) }
+        update { CastState(stage = CastStage.IDLE, devices = it.devices, positionMs = position) }
         return position
     }
 
@@ -220,19 +251,36 @@ class DlnaController(context: Context) {
     fun seekToLiveEdge() = Unit
 
     /** Renderer volume is a whole number out of a hundred, not a fraction. */
+    /**
+     * Receiver volume, with only the newest value sent.
+     *
+     * A volume slider produces a value per frame, and each one here is a SOAP round trip to a
+     * television. Sending all of them queues the renderer solid and it stops answering anything
+     * else; sending the latest when the previous one has been answered keeps the slider live
+     * and the renderer responsive. The UI is updated immediately either way, so the control
+     * never feels like it is lagging behind the finger.
+     */
     fun setVolume(volume: Float) {
         val renderer = connected ?: return
         val control = renderer.renderingControlUrl ?: return
-        val level = (volume.coerceIn(0f, 1f) * 100).toInt()
-        update { it.copy(volume = volume.coerceIn(0f, 1f)) }
+        val level = volume.coerceIn(0f, 1f)
+        update { it.copy(volume = level) }
+        pendingVolume = level
+        if (volumeInFlight) return
+        volumeInFlight = true
         background.execute {
-            client.invoke(
-                control,
-                DlnaClient.RENDERING_CONTROL,
-                "SetVolume",
-                "<InstanceID>0</InstanceID><Channel>Master</Channel>" +
-                    "<DesiredVolume>$level</DesiredVolume>",
-            )
+            while (true) {
+                val next = pendingVolume ?: break
+                pendingVolume = null
+                client.invoke(
+                    control,
+                    DlnaClient.RENDERING_CONTROL,
+                    "SetVolume",
+                    "<InstanceID>0</InstanceID><Channel>Master</Channel>" +
+                        "<DesiredVolume>${(next * 100).toInt()}</DesiredVolume>",
+                )
+            }
+            volumeInFlight = false
         }
     }
 
@@ -261,31 +309,112 @@ class DlnaController(context: Context) {
     }
 
     /**
-     * Asks the renderer where it has got to.
+     * Asks the renderer what it is doing, once a second, and believes the answer.
      *
-     * UPnP has an eventing mechanism for this, which would mean running an HTTP server inside
-     * the browser for the renderer to call back into. Polling once a second is a great deal
-     * less machinery, and a second's granularity is what a progress bar shows anyway.
+     * UPnP has an eventing mechanism, which would mean running an HTTP server inside the
+     * browser for the renderer to call back into. Polling is a great deal less machinery, and a
+     * second's granularity is what a progress bar shows anyway.
+     *
+     * What is polled matters more than how often. Position alone cannot tell the browser that
+     * somebody stopped the video with the television's own remote, or that the set was switched
+     * off — and a browser that goes on showing a cast session in either case is lying about the
+     * room. So the transport state is read as well, and both a stop and a silence end the
+     * session rather than being smoothed over.
      */
     private fun startPolling() {
         if (polling) return
         polling = true
         background.execute {
+            var silences = 0
+            var everStarted = false
+            var stops = 0
             while (polling && connected != null) {
                 val renderer = connected ?: break
-                val reply = client.invoke(
+
+                val transport = client.call(
+                    renderer.avTransportUrl,
+                    DlnaClient.AV_TRANSPORT,
+                    "GetTransportInfo",
+                    "<InstanceID>0</InstanceID>",
+                )
+                if (transport is SoapResult.Unreachable) {
+                    silences++
+                    // A television is allowed to miss an answer; it is not allowed to miss
+                    // several. Three seconds of silence is a set that has been switched off or
+                    // a network that has gone, and either way there is no session left.
+                    if (silences >= MAX_SILENCES) {
+                        connectionLost(renderer.name)
+                        return@execute
+                    }
+                    runCatching { Thread.sleep(POLL_INTERVAL_MS) }
+                    continue
+                }
+                silences = 0
+
+                val reported = (transport as? SoapResult.Ok)
+                    ?.let { UpnpParsing.soapValue(it.body, "CurrentTransportState") }
+                    ?.trim()
+                    .orEmpty()
+                if (reported == PLAYING || reported == PAUSED) everStarted = true
+                val stopped = reported == STOPPED || reported == NO_MEDIA
+                // A renderer reads as stopped in the moment between being handed a URL and
+                // starting it, so a stop only counts once it has been seen playing, and then
+                // only when it persists.
+                stops = if (stopped && everStarted) stops + 1 else 0
+                if (stops >= MAX_STOPS) {
+                    stoppedOnDevice()
+                    return@execute
+                }
+                stageFor(reported)?.let { stage -> update { it.copy(stage = stage) } }
+
+                val position = client.invoke(
                     renderer.avTransportUrl,
                     DlnaClient.AV_TRANSPORT,
                     "GetPositionInfo",
                     "<InstanceID>0</InstanceID>",
                 )
-                if (reply != null) {
-                    val position = UpnpParsing.parseClock(UpnpParsing.soapValue(reply, "RelTime"))
-                    val duration = UpnpParsing.parseClock(UpnpParsing.soapValue(reply, "TrackDuration"))
-                    update { it.copy(positionMs = position, durationMs = duration) }
+                if (position != null) {
+                    val at = UpnpParsing.parseClock(UpnpParsing.soapValue(position, "RelTime"))
+                    val duration = UpnpParsing.parseClock(UpnpParsing.soapValue(position, "TrackDuration"))
+                    update { it.copy(positionMs = at, durationMs = duration) }
                 }
                 runCatching { Thread.sleep(POLL_INTERVAL_MS) }
             }
+        }
+    }
+
+    /** The renderer's own vocabulary, which is fixed by the specification. */
+    internal fun stageFor(transportState: String): CastStage? = when (transportState) {
+        PLAYING -> CastStage.PLAYING
+        PAUSED -> CastStage.PAUSED
+        TRANSITIONING -> CastStage.BUFFERING
+        else -> null
+    }
+
+    /**
+     * Somebody stopped it on the television. That is a decision, and the browser honours it by
+     * ending the session and giving the phone its playback back.
+     */
+    private fun stoppedOnDevice() {
+        val position = state.positionMs
+        polling = false
+        connected = null
+        loaded = null
+        update { CastState(stage = CastStage.IDLE, devices = it.devices, positionMs = position) }
+    }
+
+    private fun connectionLost(name: String) {
+        val position = state.positionMs
+        polling = false
+        connected = null
+        loaded = null
+        update {
+            CastState(
+                stage = CastStage.FAILED,
+                devices = it.devices,
+                message = "Lost the connection to $name.",
+                positionMs = position,
+            )
         }
     }
 
@@ -304,6 +433,15 @@ class DlnaController(context: Context) {
     companion object {
         const val DLNA_PREFIX = "dlna:"
         private const val POLL_INTERVAL_MS = 1_000L
+        private const val MAX_SILENCES = 3
+        private const val MAX_STOPS = 2
+
+        // AVTransport's own words for what a renderer is doing.
+        private const val PLAYING = "PLAYING"
+        private const val PAUSED = "PAUSED_PLAYBACK"
+        private const val TRANSITIONING = "TRANSITIONING"
+        private const val STOPPED = "STOPPED"
+        private const val NO_MEDIA = "NO_MEDIA_PRESENT"
 
         // UPnP AV error codes, as the AVTransport service defines them.
         private const val TRANSITION_NOT_AVAILABLE = 701

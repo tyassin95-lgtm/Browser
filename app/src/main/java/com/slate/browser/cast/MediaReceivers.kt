@@ -42,13 +42,9 @@ class MediaReceivers(context: Context) {
             value(state)
         }
 
-    var onHandBack: (positionMs: Long) -> Unit = {}
-
     init {
         cast.onStateChanged = { merge() }
         dlna.onStateChanged = { merge() }
-        cast.onHandBack = { position -> onHandBack(position) }
-        dlna.onHandBack = { position -> onHandBack(position) }
         // Seeded rather than left at the default, so a phone with no Play Services still knows
         // it can search for DLNA renderers before either controller has said anything.
         merge()

@@ -500,4 +500,61 @@ class MediaFullscreenTest {
     override fun toast(message: String) = Unit
         override fun snack(message: String, actionLabel: String?, action: (() -> Unit)?) = Unit
     }
+
+    @Test
+    fun `a failed cast leaves nothing claiming to be connected`() {
+        render()
+        playing(MediaState(hasVideo = true, isPlaying = true, width = 1280, height = 720, positionMs = 9_000))
+
+        viewModel.applyCastStateForTest(
+            CastState(stage = CastStage.PLAYING, deviceName = "Living Room TV", positionMs = 60_000),
+        )
+        compose.waitForIdle()
+        assertTrue(viewModel.isCasting)
+
+        // The receiver refused it, or the connection went. Either way there is no session, and
+        // the browser must not go on showing one.
+        viewModel.applyCastStateForTest(
+            CastState(stage = CastStage.FAILED, message = "Lost the connection to Living Room TV."),
+        )
+        compose.waitForIdle()
+        assertFalse("a failure is not a session", viewModel.isCasting)
+        assertFalse(viewModel.castState.isPlayingRemotely)
+        // And the transport is the page's again, so the phone can carry on playing.
+        assertEquals(9_000L, viewModel.media.positionMs)
+    }
+
+    @Test
+    fun `a receiver that stops the video hands the transport back`() {
+        render()
+        playing(MediaState(hasVideo = true, isPlaying = true, width = 1280, height = 720, positionMs = 9_000))
+        viewModel.applyCastStateForTest(
+            CastState(stage = CastStage.PLAYING, deviceName = "Living Room TV", positionMs = 60_000),
+        )
+        compose.waitForIdle()
+
+        // Somebody pressed stop on the television. The session ends there, not here.
+        viewModel.applyCastStateForTest(CastState(stage = CastStage.IDLE, positionMs = 60_000))
+        compose.waitForIdle()
+        assertFalse(viewModel.isCasting)
+        assertEquals(9_000L, viewModel.media.positionMs)
+    }
+
+    @Test
+    fun `a session that is reconnecting keeps the receiver's place`() {
+        render()
+        playing(MediaState(hasVideo = true, isPlaying = true, width = 1280, height = 720, positionMs = 9_000))
+        viewModel.applyCastStateForTest(
+            CastState(stage = CastStage.PLAYING, deviceName = "Living Room TV", positionMs = 60_000),
+        )
+        compose.waitForIdle()
+
+        // The network hiccuped. This is not the receiver handing anything back, and starting
+        // the phone's copy for the two seconds it takes to return would be worse than waiting.
+        viewModel.applyCastStateForTest(
+            CastState(stage = CastStage.CONNECTING, deviceName = "Living Room TV", message = "Reconnecting…"),
+        )
+        compose.waitForIdle()
+        assertTrue("the session is still the browser's business", viewModel.isCasting)
+    }
 }

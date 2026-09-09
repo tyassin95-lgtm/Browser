@@ -34,6 +34,7 @@ import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.VolumeOff
 import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material3.Icon
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
@@ -94,11 +95,18 @@ fun MediaFullscreenOverlay(
     canCast: Boolean,
     /** The name of the receiver currently playing this, or blank when playing here. */
     castingTo: String,
+    /** One line describing the session, empty when nothing is being cast. */
+    castStatus: String,
+    /** Whether the receiver is working rather than waiting on the viewer. */
+    castBusy: Boolean,
     onCast: () -> Unit,
     onStopCast: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val owned = mode == MediaOverlayMode.BROWSER
+    // While a receiver has the media the browser owns the controls whatever mode this is: the
+    // page's own player is pinned and silent, so its buttons would drive a video nobody is
+    // watching. There is one transport on screen, and it drives the television.
+    val owned = mode == MediaOverlayMode.BROWSER || castStatus.isNotBlank()
     var controlsVisible by remember { mutableStateOf(true) }
     var showVolume by remember { mutableStateOf(false) }
     // Bumped on every interaction so the auto-hide timer restarts rather than stacking.
@@ -129,6 +137,10 @@ fun MediaFullscreenOverlay(
         }
 
     Box(modifier.fillMaxSize()) {
+        if (castStatus.isNotBlank()) {
+            CastingBanner(status = castStatus, busy = castBusy, modifier = Modifier.align(Alignment.Center))
+        }
+
         // When the page owns the picture, only a strip along the top edge listens, so the
         // player underneath keeps every one of its own controls.
         Box(
@@ -173,10 +185,6 @@ fun MediaFullscreenOverlay(
                     )
                 }
             }
-        }
-
-        if (castingTo.isNotBlank()) {
-            CastingBanner(deviceName = castingTo, modifier = Modifier.align(Alignment.Center))
         }
 
         HintPill(
@@ -467,28 +475,43 @@ private fun scrimGradient() = androidx.compose.ui.graphics.Brush.verticalGradien
 /**
  * What is on screen while the television has the picture.
  *
- * The page's own video is paused behind this, so without it the viewer would be looking at a
- * still frame or a black rectangle with no explanation of where their video went.
+ * Opaque on purpose. The page's video is held paused behind this, and a paused video is still a
+ * still frame of somebody's film with a play button over it — which reads as "the phone is the
+ * player" at exactly the moment it has stopped being one. A flat surface with the receiver's
+ * name on it is the honest picture of where the video actually is.
  */
 @Composable
-private fun CastingBanner(deviceName: String, modifier: Modifier = Modifier) {
-    Column(
-        modifier = modifier,
-        horizontalAlignment = Alignment.CenterHorizontally,
+private fun CastingBanner(status: String, busy: Boolean, modifier: Modifier = Modifier) {
+    Box(
+        Modifier.fillMaxSize().background(Color.Black),
+        contentAlignment = Alignment.Center,
     ) {
-        Icon(
-            Icons.Rounded.CastConnected,
-            contentDescription = null,
-            tint = Color.White,
-            modifier = Modifier.size(38.dp),
-        )
-        Spacer(Modifier.height(10.dp))
-        Text(
-            "Casting to ${'$'}deviceName",
-            color = Color.White,
-            fontSize = 15.sp,
-            fontWeight = FontWeight.Medium,
-        )
+        Column(
+            modifier = modifier,
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            if (busy) {
+                CircularProgressIndicator(
+                    color = Color.White,
+                    strokeWidth = 2.dp,
+                    modifier = Modifier.size(30.dp),
+                )
+            } else {
+                Icon(
+                    Icons.Rounded.CastConnected,
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(38.dp),
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            Text(
+                status,
+                color = Color.White,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Medium,
+            )
+        }
     }
 }
 

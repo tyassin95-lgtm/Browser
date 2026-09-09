@@ -522,7 +522,77 @@
   /** Nothing to maximise: an audio element has no frame to put on the screen. */
   function isVisual(el) { return !!el && el.tagName !== 'AUDIO'; }
 
+  /*
+   * Remote mode: a receiver has the media, and this page must stop rendering it.
+   *
+   * A pause is not enough. Every serious player reacts to being paused by something it did not
+   * do — an advert break ending, a visibility change, its own retry logic — by calling play()
+   * again, and the result is a phone and a television playing the same video half a second
+   * apart in the same room. So the element is pinned: paused, muted, and pushed back to paused
+   * by a listener on its own play event for as long as the receiver has the media.
+   *
+   * Muting matters as much as pausing. If a page does win a frame or two before the guard fires
+   * again, silence is the difference between a flicker nobody notices and an echo everybody
+   * does.
+   */
+  var remote = false;
+  var remoteVideo = null;
+  var remoteWasMuted = false;
+
+  function remoteGuard() {
+    if (!remote || !remoteVideo) return;
+    try { remoteVideo.pause(); } catch (e) { /* ignore */ }
+  }
+
+  function setRemote(v, on) {
+    if (on) {
+      if (remote && remoteVideo === v) return;
+      if (remote) releaseRemote();
+      remote = true;
+      remoteVideo = v;
+      remoteWasMuted = !!v.muted;
+      try { v.addEventListener('play', remoteGuard, true); } catch (e) { /* ignore */ }
+      try { v.pause(); } catch (e) { /* ignore */ }
+      v.muted = true;
+    } else {
+      releaseRemote();
+    }
+    scheduleReport();
+  }
+
+  function releaseRemote() {
+    var v = remoteVideo;
+    remote = false;
+    remoteVideo = null;
+    if (!v) return;
+    try { v.removeEventListener('play', remoteGuard, true); } catch (e) { /* ignore */ }
+    try { v.muted = remoteWasMuted; } catch (e) { /* ignore */ }
+  }
+
+  /*
+   * A page that swaps its video element mid-session — an advert ending, a quality change — would
+   * otherwise leave the guard watching an element nobody can see any more while the new one
+   * plays. Re-pinning on each report follows the page.
+   */
+  function holdRemote() {
+    if (!remote) return;
+    var current = activeVideo || (bestLocal() || {}).el;
+    if (current && current !== remoteVideo) setRemote(current, true);
+    else remoteGuard();
+  }
+
   function apply(type, arg) {
+    // Remote mode goes everywhere rather than following the fullscreen route. The receiver
+    // takes over whether or not the browser is showing the video full screen, and the element
+    // that must be silenced is often in an iframe this frame cannot see into — so every frame
+    // is told, and each one pins whatever it owns.
+    if (type === 'remote') {
+      toChildren({ ns: NS, type: 'cmd', cmd: 'remote', arg: arg });
+      var target = activeVideo || (bestLocal() || {}).el;
+      if (target) setRemote(target, arg === '1');
+      else if (arg !== '1') releaseRemote();
+      return;
+    }
     if (routeChild && routeChild.isConnected) {
       post(routeChild.contentWindow, { ns: NS, type: 'cmd', cmd: type, arg: arg });
       return;
@@ -530,6 +600,9 @@
     var v = activeVideo || (bestLocal() || {}).el;
     if (!v) return;
     try {
+      // Anything that would start this page playing implicitly ends remote mode: the browser
+      // only sends those once the receiver has given the media back.
+      if (remote && (type === 'play' || type === 'playPause')) releaseRemote();
       if (type === 'playPause') { if (v.paused) v.play(); else v.pause(); }
       // Explicit rather than a toggle: handing playback to a receiver and taking it back are
       // both states the browser knows it wants, and a toggle would race the page's own.
@@ -670,6 +743,7 @@
     stopProgressTicker();
     progressTicker = setInterval(function () {
       if (!active) { stopProgressTicker(); return; }
+      holdRemote();
       reportProgressNow();
     }, 1000);
   }
@@ -685,6 +759,7 @@
     if (reportTimer) return;
     reportTimer = setTimeout(function () {
       reportTimer = null;
+      holdRemote();
       if (TOP) scan();
       else post(parent, { ns: NS, type: 'changed' });
     }, 250);
