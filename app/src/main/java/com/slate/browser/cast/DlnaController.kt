@@ -3,6 +3,9 @@ package com.slate.browser.cast
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.webkit.CookieManager
+import android.webkit.WebSettings
+import com.slate.browser.cast.hls.StreamRelay
 import com.slate.browser.cast.dlna.DlnaClient
 import com.slate.browser.cast.dlna.SoapResult
 import com.slate.browser.cast.dlna.UpnpParsing
@@ -31,6 +34,44 @@ class DlnaController(context: Context) {
     private var renderers: List<UpnpRenderer> = emptyList()
     private var connected: UpnpRenderer? = null
     private var loaded: CastVerdict.Castable? = null
+
+    /** The phone's own stream server, used when the renderer cannot fetch what the page plays. */
+    private val relay = StreamRelay()
+
+    /** True while the television is being fed by this phone rather than fetching for itself. */
+    @Volatile private var relaying = false
+
+    /** What the relayed stream is, so a seek hands the renderer the same thing again. */
+    @Volatile private var relaySource: CastSource? = null
+
+    /** Where the relayed stream was started from, since the renderer counts from zero. */
+    @Volatile private var baseOffsetMs = 0L
+
+    /** The duration the playlist declared, which a relayed stream cannot report for itself. */
+    @Volatile private var knownDurationMs = 0L
+
+    /**
+     * Where the viewer has just asked to be, and until when to believe them over the renderer.
+     *
+     * A renderer reports the position it is playing, and for a second or two after a seek that
+     * is still the old one — which is exactly what "the bar jumps back the moment I let go"
+     * looks like. The asked-for position is shown until the renderer catches up to it or gives
+     * up trying; it is reconciliation, not a delay, and the renderer always wins in the end.
+     */
+    @Volatile private var seekTargetMs = -1L
+
+    @Volatile private var seekDeadline = 0L
+
+    /**
+     * When a stop reported by the renderer is the browser's own doing.
+     *
+     * Handing a renderer a new address stops it before it starts again. Without this the poll
+     * would read the browser's own seek as somebody switching the television off.
+     */
+    @Volatile private var ignoreStopsUntil = 0L
+
+    private val userAgent: String =
+        runCatching { WebSettings.getDefaultUserAgent(context) }.getOrDefault("")
     private var discovering = false
     private var wantActive = false
     private var polling = false
@@ -129,6 +170,7 @@ class DlnaController(context: Context) {
         connected = null
         loaded = null
         polling = false
+        stopRelay()
         if (renderer != null) {
             background.execute {
                 runCatching {
@@ -147,58 +189,142 @@ class DlnaController(context: Context) {
 
     // ---- Media --------------------------------------------------------------
 
-    fun load(castable: CastVerdict.Castable, startAtMs: Long) {
+    fun load(castable: CastVerdict.Castable, startAtMs: Long, receiverCanFetch: Boolean = true) {
         val renderer = connected ?: return
         loaded = castable
-        // A DLNA renderer is a file player, not a streaming client: it is given the plain file
-        // if the page gave the browser one, and only falls back to a manifest when that is the
-        // only address in existence.
-        val source = castable.forFilePlayer
         update { it.copy(stage = CastStage.LOADING, message = "", isLive = castable.isLive) }
         background.execute {
-            val metadata = UpnpParsing.didl(
-                title = castable.title,
-                url = source.url,
-                contentType = source.contentType,
-                isLive = castable.isLive,
-            )
-            val set = client.call(
-                renderer.avTransportUrl,
-                DlnaClient.AV_TRANSPORT,
-                "SetAVTransportURI",
-                "<InstanceID>0</InstanceID>" +
-                    "<CurrentURI>${UpnpParsing.escape(source.url)}</CurrentURI>" +
-                    "<CurrentURIMetaData>${UpnpParsing.escape(metadata)}</CurrentURIMetaData>",
-            )
-            if (set !is SoapResult.Ok) {
+            // A DLNA renderer is a file player, and there are two reasons it cannot simply be
+            // given the address the page is using. An adaptive stream is a playlist, which it
+            // has no way of assembling and never will. And a great many hosts serve their video
+            // only to the page that embeds it, so a television asking for the same address is
+            // refused. The phone answers both by fetching the stream itself and serving it.
+            val direct = castable.forFilePlayer
+            val mustRelay = direct.format != StreamFormat.PROGRESSIVE || !receiverCanFetch
+            val relayed = if (mustRelay) relayFor(castable, direct) else null
+            if (relayed == null && mustRelay) {
                 update {
-                    it.copy(
-                        stage = CastStage.FAILED,
-                        message = refusalMessage(renderer.name, source, set),
-                    )
+                    it.copy(stage = CastStage.FAILED, message = relayFailure(renderer.name, direct))
                 }
                 return@execute
             }
-            client.invoke(
-                renderer.avTransportUrl,
-                DlnaClient.AV_TRANSPORT,
-                "Play",
-                "<InstanceID>0</InstanceID><Speed>1</Speed>",
-            )
-            // Renderers vary on whether they honour a start position at all, so it is asked for
-            // after playback begins and its refusal is not treated as a failure.
-            if (!castable.isLive && startAtMs > 1_000) {
-                client.invoke(
-                    renderer.avTransportUrl,
-                    DlnaClient.AV_TRANSPORT,
-                    "Seek",
-                    "<InstanceID>0</InstanceID><Unit>REL_TIME</Unit>" +
-                        "<Target>${UpnpParsing.formatClock(startAtMs)}</Target>",
-                )
-            }
-            update { it.copy(stage = CastStage.PLAYING) }
-            startPolling()
+            val source = relayed?.let {
+                CastSource(it.url, StreamFormat.PROGRESSIVE, it.contentType)
+            } ?: direct
+            // Only a reassembled stream needs seeking done by restarting it. A file forwarded
+            // byte for byte keeps its ranges, so the renderer seeks in it exactly as it would
+            // have if it had fetched the file itself.
+            relaying = relayed != null && !relayed.seekableByReceiver
+            relaySource = source
+            knownDurationMs = relayed?.durationMs ?: 0
+            hand(renderer, castable, source, startAtMs)
         }
+    }
+
+    /**
+     * Puts the stream through the phone, and returns the local address to hand the television.
+     *
+     * The fetching is done as the page: its referrer, its cookies, its user agent. That is not a
+     * trick, it is the point — the site is answering the client it already trusts, and the
+     * television is given a local address with no credentials anywhere in it.
+     */
+    private fun relayFor(
+        castable: CastVerdict.Castable,
+        direct: CastSource,
+    ): StreamRelay.Published? {
+        // A playlist is relayed as pieces; a file the television is not allowed to fetch is
+        // relayed as a file. A DASH manifest is neither: its picture and its sound are separate
+        // streams that would have to be muxed, which is a video pipeline rather than a relay.
+        val stream = when {
+            direct.format == StreamFormat.PROGRESSIVE -> direct
+            castable.forAdaptiveReceiver.format == StreamFormat.HLS -> castable.forAdaptiveReceiver
+            else -> return null
+        }
+        relay.stop()
+        return relay.publish(
+            StreamRelay.Source(
+                playlistUrl = stream.url,
+                // The browser's own referrer for this stream. A host that serves only its
+                // embedded player is answered by the same thing it answered before.
+                referer = castable.referer.ifBlank { castable.pageUrl },
+                cookies = runCatching { CookieManager.getInstance().getCookie(stream.url) }
+                    .getOrNull()
+                    .orEmpty(),
+                userAgent = userAgent,
+            ),
+        )
+    }
+
+    /** Hands the renderer an address and starts it, with the position asked for built in. */
+    private fun hand(
+        renderer: UpnpRenderer,
+        castable: CastVerdict.Castable,
+        source: CastSource,
+        startAtMs: Long,
+    ) {
+        // A relayed stream carries no position of its own: the phone starts feeding it from
+        // wherever it was asked to, and the renderer counts from zero. Remembering the offset
+        // here is what keeps the progress bar honest.
+        val startAt = if (castable.isLive) 0 else startAtMs.coerceAtLeast(0)
+        val url = if (relaying) relay.urlFor(startAt / 1000) else source.url
+        baseOffsetMs = if (relaying) startAt else 0
+        // The renderer is about to stop and start, because that is what being given a new
+        // address means. That is not the television being switched off.
+        ignoreStopsUntil = System.currentTimeMillis() + HANDOVER_SETTLE_MS
+
+        val metadata = UpnpParsing.didl(
+            title = castable.title,
+            url = url,
+            contentType = source.contentType,
+            isLive = castable.isLive || relaying,
+        )
+        val set = client.call(
+            renderer.avTransportUrl,
+            DlnaClient.AV_TRANSPORT,
+            "SetAVTransportURI",
+            "<InstanceID>0</InstanceID>" +
+                "<CurrentURI>${UpnpParsing.escape(url)}</CurrentURI>" +
+                "<CurrentURIMetaData>${UpnpParsing.escape(metadata)}</CurrentURIMetaData>",
+        )
+        if (set !is SoapResult.Ok) {
+            update {
+                it.copy(stage = CastStage.FAILED, message = refusalMessage(renderer.name, source, set))
+            }
+            return
+        }
+        client.invoke(
+            renderer.avTransportUrl,
+            DlnaClient.AV_TRANSPORT,
+            "Play",
+            "<InstanceID>0</InstanceID><Speed>1</Speed>",
+        )
+        // A file the renderer fetches itself can be asked to start partway in. A relayed stream
+        // already starts where it was told to, and asking again would only confuse it.
+        if (!relaying && !castable.isLive && startAt > 1_000) {
+            seekOnRenderer(renderer, startAt)
+        }
+        update {
+            it.copy(
+                stage = CastStage.PLAYING,
+                positionMs = baseOffsetMs,
+                durationMs = if (knownDurationMs > 0) knownDurationMs else it.durationMs,
+            )
+        }
+        startPolling()
+    }
+
+    /**
+     * Why the phone could not put the stream back together, which is a different failure from
+     * the television refusing something.
+     */
+    internal fun relayFailure(deviceName: String, source: CastSource): String = when (source.format) {
+        StreamFormat.PROGRESSIVE ->
+            "The site wouldn't hand this video over for $deviceName. Screen mirroring will show it."
+        StreamFormat.HLS ->
+            "The browser couldn't rebuild this stream for $deviceName. Screen mirroring will show it."
+        else ->
+            "$deviceName can't play this kind of stream, and the browser can't convert it. " +
+                "Screen mirroring will show it."
     }
 
     /**
@@ -234,32 +360,65 @@ class DlnaController(context: Context) {
 
     fun stopRemote() = transport("Stop", "<InstanceID>0</InstanceID>", CastStage.CONNECTED)
 
+    /**
+     * Moves the television, which for a relayed stream means starting a new one.
+     *
+     * A renderer can only seek in something it fetched itself and can ask for byte ranges of. A
+     * stream the phone is feeding it has no length and no ranges — so seeking is done by handing
+     * it the same stream again from a different offset, which is an operation every renderer
+     * supports because it is just another address. That it is a restart rather than a seek is
+     * invisible: it lands at the second the viewer asked for.
+     */
     fun seekTo(positionMs: Long) {
         val renderer = connected ?: return
-        update { it.copy(positionMs = positionMs.coerceAtLeast(0)) }
+        val target = positionMs.coerceAtLeast(0)
+        val castable = loaded
+        seekTargetMs = target
+        seekDeadline = System.currentTimeMillis() + SEEK_SETTLE_MS
+        update { it.copy(positionMs = target) }
         background.execute {
-            client.invoke(
-                renderer.avTransportUrl,
-                DlnaClient.AV_TRANSPORT,
-                "Seek",
-                "<InstanceID>0</InstanceID><Unit>REL_TIME</Unit>" +
-                    "<Target>${UpnpParsing.formatClock(positionMs)}</Target>",
-            )
+            val relayed = relaySource
+            if (relaying && castable != null && relayed != null) {
+                // The same stream, started somewhere else — described to the renderer exactly as
+                // it was the first time, because it is the same thing.
+                hand(renderer, castable, relayed, target)
+                return@execute
+            }
+            seekOnRenderer(renderer, target)
         }
     }
 
+    /**
+     * Asks a renderer to move, in both of the ways the specification allows.
+     *
+     * `REL_TIME` is the usual one and plenty of televisions refuse it while accepting
+     * `ABS_TIME`; there is no way to know which without asking. A refusal from both is reported
+     * rather than swallowed, because the alternative — the progress bar snapping back a second
+     * later when the poll returns the position the television never left — is the browser
+     * pretending it did something it did not.
+     */
+    /** A renderer has no idea of a live edge: the stream it is being fed is already at one. */
     fun seekToLiveEdge() = Unit
 
-    /** Renderer volume is a whole number out of a hundred, not a fraction. */
-    /**
-     * Receiver volume, with only the newest value sent.
-     *
-     * A volume slider produces a value per frame, and each one here is a SOAP round trip to a
-     * television. Sending all of them queues the renderer solid and it stops answering anything
-     * else; sending the latest when the previous one has been answered keeps the slider live
-     * and the renderer responsive. The UI is updated immediately either way, so the control
-     * never feels like it is lagging behind the finger.
-     */
+    private fun seekOnRenderer(renderer: UpnpRenderer, positionMs: Long) {
+        val clock = UpnpParsing.formatClock(positionMs)
+        val relative = client.call(
+            renderer.avTransportUrl,
+            DlnaClient.AV_TRANSPORT,
+            "Seek",
+            "<InstanceID>0</InstanceID><Unit>REL_TIME</Unit><Target>$clock</Target>",
+        )
+        if (relative is SoapResult.Ok) return
+        val absolute = client.call(
+            renderer.avTransportUrl,
+            DlnaClient.AV_TRANSPORT,
+            "Seek",
+            "<InstanceID>0</InstanceID><Unit>ABS_TIME</Unit><Target>$clock</Target>",
+        )
+        if (absolute is SoapResult.Ok) return
+        update { it.copy(message = "${renderer.name} won't let this stream be moved.") }
+    }
+
     fun setVolume(volume: Float) {
         val renderer = connected ?: return
         val control = renderer.renderingControlUrl ?: return
@@ -360,7 +519,8 @@ class DlnaController(context: Context) {
                 // A renderer reads as stopped in the moment between being handed a URL and
                 // starting it, so a stop only counts once it has been seen playing, and then
                 // only when it persists.
-                stops = if (stopped && everStarted) stops + 1 else 0
+                val ourDoing = System.currentTimeMillis() < ignoreStopsUntil
+                stops = if (stopped && everStarted && !ourDoing) stops + 1 else 0
                 if (stops >= MAX_STOPS) {
                     stoppedOnDevice()
                     return@execute
@@ -376,7 +536,23 @@ class DlnaController(context: Context) {
                 if (position != null) {
                     val at = UpnpParsing.parseClock(UpnpParsing.soapValue(position, "RelTime"))
                     val duration = UpnpParsing.parseClock(UpnpParsing.soapValue(position, "TrackDuration"))
-                    update { it.copy(positionMs = at, durationMs = duration) }
+                    // A relayed stream is fed from an offset and the renderer counts from zero,
+                    // so its clock is added to where the phone started rather than taken as the
+                    // position in the film. The duration comes from the playlist, which is the
+                    // only place it exists at all.
+                    val reported = baseOffsetMs + at
+                    // Until the renderer reaches where it was sent, what the viewer asked for is
+                    // the truer answer; after that the renderer is, always.
+                    val settled = seekTargetMs < 0 ||
+                        System.currentTimeMillis() > seekDeadline ||
+                        reported >= seekTargetMs - SEEK_TOLERANCE_MS
+                    if (settled) seekTargetMs = -1
+                    update {
+                        it.copy(
+                            positionMs = if (settled) reported else seekTargetMs,
+                            durationMs = if (knownDurationMs > 0) knownDurationMs else duration,
+                        )
+                    }
                 }
                 runCatching { Thread.sleep(POLL_INTERVAL_MS) }
             }
@@ -400,6 +576,7 @@ class DlnaController(context: Context) {
         polling = false
         connected = null
         loaded = null
+        stopRelay()
         update { CastState(stage = CastStage.IDLE, devices = it.devices, positionMs = position) }
     }
 
@@ -408,6 +585,7 @@ class DlnaController(context: Context) {
         polling = false
         connected = null
         loaded = null
+        stopRelay()
         update {
             CastState(
                 stage = CastStage.FAILED,
@@ -425,15 +603,33 @@ class DlnaController(context: Context) {
         main.post { onStateChanged(next) }
     }
 
+    /**
+     * The phone stops being a server the moment it stops being a source.
+     *
+     * The relay exists for the length of one cast session and not a second longer: no listening
+     * socket outlives the thing it was opened for.
+     */
+    private fun stopRelay() {
+        relaying = false
+        relaySource = null
+        baseOffsetMs = 0
+        knownDurationMs = 0
+        runCatching { relay.stop() }
+    }
+
     fun release() {
         polling = false
         connected = null
+        stopRelay()
     }
 
     companion object {
         const val DLNA_PREFIX = "dlna:"
         private const val POLL_INTERVAL_MS = 1_000L
         private const val MAX_SILENCES = 3
+        private const val SEEK_SETTLE_MS = 6_000L
+        private const val SEEK_TOLERANCE_MS = 2_000L
+        private const val HANDOVER_SETTLE_MS = 8_000L
         private const val MAX_STOPS = 2
 
         // AVTransport's own words for what a renderer is doing.

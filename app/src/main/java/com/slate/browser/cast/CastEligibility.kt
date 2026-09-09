@@ -45,6 +45,18 @@ sealed interface CastVerdict {
         val posterUrl: String,
         /** A plain media file the page also fetched, if there was one. */
         val plainFile: CastSource? = null,
+        /**
+         * The page this came from.
+         *
+         * Needed because a stream is very often served only to the page that embeds it: when
+         * the phone fetches it on a receiver's behalf, it has to ask as that page.
+         */
+        val pageUrl: String = "",
+        /**
+         * The referrer the browser used for this stream, which is the embedded player's address
+         * rather than the page in the address bar.
+         */
+        val referer: String = "",
     ) : CastVerdict {
 
         /** What a receiver that understands adaptive streaming gets: the manifest. */
@@ -75,6 +87,7 @@ object CastEligibility {
         pageUrl: String,
         observedManifest: String? = null,
         observedMediaFile: String? = null,
+        observedReferer: String? = null,
     ): CastVerdict {
         if (!media.hasMedia) return CastVerdict.NothingPlaying
 
@@ -125,6 +138,8 @@ object CastEligibility {
             title = media.pageTitle.ifBlank { host },
             posterUrl = media.posterUrl.takeIf { UrlSafety.isWeb(it) }.orEmpty(),
             plainFile = plainFile(url, format, observedMediaFile, media.audioOnly),
+            pageUrl = pageUrl,
+            referer = observedReferer?.takeIf { UrlSafety.isWeb(it) } ?: pageUrl,
         )
     }
 

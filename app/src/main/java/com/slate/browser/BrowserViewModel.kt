@@ -809,6 +809,7 @@ class BrowserViewModel @JvmOverloads constructor(
         pageUrl = activeTab?.url.orEmpty(),
         observedManifest = activeTab?.observedManifest,
         observedMediaFile = activeTab?.observedMediaFile,
+        observedReferer = activeTab?.observedManifestReferer,
     )
 
     /**
@@ -891,12 +892,20 @@ class BrowserViewModel @JvmOverloads constructor(
         // Cast receiver gets the manifest, a DLNA television gets a plain file.
         val source =
             if (controller.prefersPlainFile) verdict.forFilePlayer else verdict.forAdaptiveReceiver
+        // When the phone is going to fetch the stream itself — as the page, with its cookies —
+        // there is nothing to ask. The question the probe answers is whether a stranger could
+        // fetch this, and no stranger is going to.
+        val receiverFetchesItself = !controller.willRelay(verdict)
         viewModelScope.launch {
-            val reachable = withContext(Dispatchers.IO) {
-                CastPreflight.check(
-                    source.url,
-                    rangedRequest = source.format == StreamFormat.PROGRESSIVE,
-                )
+            val reachable = if (receiverFetchesItself) {
+                withContext(Dispatchers.IO) {
+                    CastPreflight.check(
+                        source.url,
+                        rangedRequest = source.format == StreamFormat.PROGRESSIVE,
+                    )
+                }
+            } else {
+                CastPreflight.Result.Reachable(null)
             }
             // A refusal here has to be worth the words. Only an answer that actually settles
             // the question stops the attempt: an inconclusive probe — a timeout, a server
@@ -904,12 +913,19 @@ class BrowserViewModel @JvmOverloads constructor(
             // what a television on its own connection would get, and refusing on it is how a
             // browser ends up declining media that would have played perfectly well. When the
             // probe cannot tell, the receiver is asked and its own answer is reported.
+            // Being unable to fetch something is only a refusal when nobody else can fetch it
+            // either. Where the phone can stand in — it is the client the site is already
+            // serving, signed in and referred by the right page — a receiver's inability to
+            // fetch the address is a reason to relay rather than a reason to stop.
+            val phoneCanStandIn = controller.canRelay
             val refusal = when (reachable) {
                 is CastPreflight.Result.NeedsSignIn ->
-                    "This video needs you to be signed in, and the TV can't sign in for you."
+                    if (phoneCanStandIn) null
+                    else "This video needs you to be signed in, and the TV can't sign in for you."
                 is CastPreflight.Result.Forbidden ->
-                    "This site only serves this video to the page it came from, so a TV can't " +
-                        "fetch it. Screen mirroring will show it."
+                    if (phoneCanStandIn) null
+                    else "This site only serves this video to the page it came from, so a TV " +
+                        "can't fetch it. Screen mirroring will show it."
                 is CastPreflight.Result.NotMedia ->
                     "That address answers with a web page rather than a video."
                 is CastPreflight.Result.Missing ->
@@ -920,7 +936,11 @@ class BrowserViewModel @JvmOverloads constructor(
             // second later — the page is put into remote mode and held there for as long as
             // the receiver has the media.
             enterRemotePlayback()
-            controller.load(verdict, startAt)
+            controller.load(
+                verdict,
+                startAt,
+                receiverCanFetch = reachable is CastPreflight.Result.Reachable,
+            )
         }
     }
 

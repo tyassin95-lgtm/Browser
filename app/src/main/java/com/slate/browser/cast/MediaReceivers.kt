@@ -97,6 +97,25 @@ class MediaReceivers(context: Context) {
      */
     val prefersPlainFile: Boolean get() = active == Owner.DLNA
 
+    /**
+     * Whether the phone will be the one fetching the media rather than the receiver.
+     *
+     * It changes what is worth checking beforehand: a probe that asks "could a stranger fetch
+     * this?" answers a question nobody is asking when the fetching is done by the browser, with
+     * the page's own cookies, on the connection that is already playing it.
+     */
+    fun willRelay(castable: CastVerdict.Castable): Boolean =
+        canRelay && castable.forFilePlayer.format != StreamFormat.PROGRESSIVE
+
+    /**
+     * Whether the phone could fetch this on the receiver's behalf if it had to.
+     *
+     * It is what turns "the site won't serve this to a television" from a refusal into a
+     * different route: the browser is the client the site trusts, and the receiver only ever
+     * sees a local address.
+     */
+    val canRelay: Boolean get() = active == Owner.DLNA
+
     fun startDiscovery(active: Boolean) {
         cast.startDiscovery(active)
         dlna.startDiscovery(active)
@@ -123,9 +142,14 @@ class MediaReceivers(context: Context) {
         }
     }
 
-    fun load(castable: CastVerdict.Castable, startAtMs: Long) = withOwner(
+    fun load(
+        castable: CastVerdict.Castable,
+        startAtMs: Long,
+        /** Whether the receiver can fetch this itself, or the phone has to fetch it for it. */
+        receiverCanFetch: Boolean = true,
+    ) = withOwner(
         onCast = { cast.load(castable, startAtMs) },
-        onDlna = { dlna.load(castable, startAtMs) },
+        onDlna = { dlna.load(castable, startAtMs, receiverCanFetch) },
     )
 
     fun play() = withOwner({ cast.play() }, { dlna.play() })

@@ -286,6 +286,39 @@ read with a hard byte cap and treated as hostile input like any other network re
 third-party UPnP stack was tried first and could not be resolved from any published repository;
 the wire format is small enough that speaking it directly is the smaller risk.
 
+**When the phone has to be the server.** A DLNA television is a file player, and the streams
+people actually watch are not files. Every serious video host serves HLS — a playlist of short
+pieces — and most of them serve it only to the page that embeds it, refusing anything else. Both
+halves of that are unanswerable from the television's side.
+
+So the phone answers them. It is already the client the site trusts, so it fetches the pieces
+itself, with the tab's own referrer and cookies, and serves them to the television over the local
+network as one continuous stream. Nothing is transcoded and nothing is uploaded anywhere: the
+pieces are passed through as they arrive, so the quality is exactly what the site served and the
+battery is not spent on a video encoder. A stream encrypted with HLS's own AES-128 is decrypted
+on the way through, which is transport encryption rather than a licence — the key is served to
+whoever may play the stream, and the phone may. Anything that needs a licence is DRM and is
+refused before casting is offered. An ordinary file that a host will not hand to a television is
+relayed too, byte for byte with its ranges intact, so the renderer keeps its own seeking.
+
+The referrer is the browser's own. These hosts serve their video to an embedded player two
+origins from the page in the address bar, so the referrer the browser used to fetch the playlist
+is recorded with the playlist and used again — a guess would fail on every host worth casting.
+
+The relay is a server only for as long as a cast session is. It answers one unguessable path,
+refuses anything that is not on the local network, and can be asked for exactly one thing: the
+stream the user chose. No part of a request names an address to fetch, so it is not a proxy for
+anything else, and the television is handed a local address with no credentials anywhere in it.
+
+Seeking follows from that. A reassembled stream has no length and no byte ranges, so a seek is
+not a seek: the renderer is handed the same stream again, started at the second the viewer asked
+for. That is an operation every renderer supports, because it is just another address. Where the
+relay is passing a file through, the ranges survive and the renderer seeks the way it always
+does — and where the television is fetching for itself, `REL_TIME` is tried and then `ABS_TIME`,
+since sets refuse one or the other and there is no way to know which without asking. A refusal
+from both is reported rather than swallowed, because a progress bar that snaps back a second
+later is the browser pretending it did something it did not.
+
 AirPlay is not open to Android apps, and a Fire TV Stick implements neither Cast nor DLNA as a
 receiver. For those, the picker offers screen mirroring — the system's own Wi-Fi Display
 hand-off, one row at the bottom that opens the platform's cast settings. It sends the whole

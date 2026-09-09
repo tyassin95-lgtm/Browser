@@ -88,6 +88,17 @@ class Tab(
     internal var observedManifest: String? = null
 
     /**
+     * The referrer the browser sent when it fetched that manifest.
+     *
+     * Video hosts serve their streams only to the page that embeds them, and that page is
+     * almost never the one in the address bar — it is an embedded player two origins away. When
+     * the phone fetches the stream on a receiver's behalf it has to ask exactly as the browser
+     * did, and this is the browser's own answer rather than a guess at it.
+     */
+    @Volatile
+    internal var observedManifestReferer: String? = null
+
+    /**
      * The first plain media file this document asked for, for the receivers that cannot play a
      * manifest at all — a DLNA television is a file player, and handing it a playlist gets a
      * flat refusal. Recorded only until a manifest appears, because everything a page fetches

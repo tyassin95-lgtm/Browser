@@ -159,6 +159,11 @@ class SlateWebViewClient(
         val url = runCatching { request.url.toString() }.getOrNull() ?: return
         if (MediaManifests.isManifest(url)) {
             tab.observedManifest = url
+            tab.observedManifestReferer = runCatching {
+                request.requestHeaders.entries
+                    .firstOrNull { it.key.equals("Referer", ignoreCase = true) }
+                    ?.value
+            }.getOrNull()
             return
         }
         // A plain file, kept for a receiver that only plays files. Only before a manifest is
@@ -173,6 +178,7 @@ class SlateWebViewClient(
         documentUrl = url
         // A new document is a new stream; the last page's playlist is not this page's.
         tab.observedManifest = null
+        tab.observedManifestReferer = null
         tab.observedMediaFile = null
         pendingMainFrame = null
         pendingHttpStatus = null
@@ -208,6 +214,7 @@ class SlateWebViewClient(
         // Single-page apps navigate without a page load; keep the omnibox honest.
         documentUrl = url
         tab.observedManifest = null
+        tab.observedManifestReferer = null
         tab.observedMediaFile = null
         tab.url = url
         tab.canGoBack = view.canGoBack()

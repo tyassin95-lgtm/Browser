@@ -54,16 +54,18 @@ class ManifestObservationTest {
         )
     }
 
-    private fun request(url: String) = object : WebResourceRequest {
+    private fun request(url: String, headers: MutableMap<String, String> = mutableMapOf()) =
+        object : WebResourceRequest {
         override fun getUrl(): Uri = Uri.parse(url)
         override fun isForMainFrame() = false
         override fun isRedirect() = false
         override fun hasGesture() = false
         override fun getMethod() = "GET"
-        override fun getRequestHeaders(): MutableMap<String, String> = mutableMapOf()
+        override fun getRequestHeaders(): MutableMap<String, String> = headers
     }
 
-    private fun fetch(url: String) = client.shouldInterceptRequest(FakeWebView.of(), request(url))
+    private fun fetch(url: String, headers: Map<String, String> = emptyMap()) =
+        client.shouldInterceptRequest(FakeWebView.of(), request(url, headers.toMutableMap()))
 
     @Test
     fun `the playlist a player fetches is remembered`() {
@@ -141,6 +143,28 @@ class ManifestObservationTest {
         fetch("https://cdn.example.com/videos/talk.mp4")
         client.onPageStarted(FakeWebView.of(), "https://example.com/another", null)
         assertNull(tab.observedMediaFile)
+    }
+
+    @Test
+    fun `the referrer the browser used is remembered with the playlist`() {
+        // These streams are served only to the player that embeds them, and that player is
+        // almost never the page in the address bar. Guessing it would fail on every host that
+        // matters; the browser's own request already says.
+        fetch(
+            "https://cdn.example.com/live/master.m3u8",
+            headers = mapOf("Referer" to "https://embed.example.net/player/9"),
+        )
+        assertEquals("https://embed.example.net/player/9", tab.observedManifestReferer)
+    }
+
+    @Test
+    fun `a new page forgets the last one's referrer too`() {
+        fetch(
+            "https://cdn.example.com/live/master.m3u8",
+            headers = mapOf("Referer" to "https://embed.example.net/player/9"),
+        )
+        client.onPageStarted(FakeWebView.of(), "https://example.com/another", null)
+        assertNull(tab.observedManifestReferer)
     }
 
     private object SilentHost : BrowserHost {
