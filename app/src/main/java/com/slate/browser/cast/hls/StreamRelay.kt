@@ -39,7 +39,7 @@ class StreamRelay(
      * exercised over a loopback socket in a test; in the browser it is always the Wi-Fi address,
      * because that is the one a television can reach.
      */
-    private val hostAddress: () -> String? = { localAddress() },
+    private val hostAddress: (peer: String?) -> String? = { peer -> localAddress(peer) },
 ) {
 
     /** What the phone will fetch, and as whom. Headers come from the tab doing the playing. */
@@ -70,6 +70,20 @@ class StreamRelay(
     private enum class Mode { PIECES, FILE }
 
     private var mode = Mode.PIECES
+    private var peer: String? = null
+
+    /**
+     * Whether the receiver ever actually asked for the stream.
+     *
+     * The difference between "the television refused this" and "the television never reached
+     * the phone" is the difference between two completely different problems, and it is not
+     * visible from the renderer's status. It is visible here.
+     */
+    @Volatile var wasFetched = false
+        private set
+
+    /** What to call the stream to this particular receiver, once it has said what it accepts. */
+    @Volatile var contentTypeOverride: String? = null
     private var server: ServerSocket? = null
     private var token: String = ""
     private var source: Source? = null
@@ -82,7 +96,8 @@ class StreamRelay(
      * something the phone can reassemble.
      */
     @Synchronized
-    fun publish(source: Source): Published? {
+    fun publish(source: Source, peer: String? = null): Published? {
+        this.peer = peer
         val fetched = fetchText(source, source.playlistUrl)
         // Not a playlist: an ordinary file, which is relayed byte for byte. Worth doing because
         // a great many hosts serve a perfectly ordinary MP4 that they will hand to the page and
@@ -103,6 +118,7 @@ class StreamRelay(
         val address = listen() ?: return null
         this.source = source.copy(playlistUrl = mediaUrl)
         mode = Mode.PIECES
+        wasFetched = false
 
         // A fragmented-MP4 stream needs its initialisation section before anything else and is
         // then an MP4; a stream of transport-stream pieces is an MPEG-TS. Both are containers a
@@ -133,6 +149,7 @@ class StreamRelay(
         val address = listen() ?: return null
         this.source = source
         mode = Mode.FILE
+        wasFetched = false
         return Published(
             url = "$address/stream/$token",
             contentType = type.ifEmpty { "video/mp4" },
@@ -144,7 +161,7 @@ class StreamRelay(
 
     /** Opens the door, once per session, and names the address the receiver should knock on. */
     private fun listen(): String? {
-        val host = hostAddress() ?: return null
+        val host = hostAddress(peer) ?: return null
         val socket = server ?: runCatching { ServerSocket(0) }.getOrNull() ?: return null
         if (server == null) {
             server = socket
@@ -212,19 +229,30 @@ class StreamRelay(
             return
         }
 
+        wasFetched = true
         val playlistText = fetchText(feed, feed.playlistUrl) ?: return
         val media = HlsPlaylist.media(playlistText, feed.playlistUrl)
-        val contentType = if (media.initUrl != null) "video/mp4" else "video/mp2t"
+        val natural = if (media.initUrl != null) "video/mp4" else "video/mp2t"
+        val contentType = contentTypeOverride ?: natural
 
-        // No length and no ranges: this is a live pipe the phone is filling as it goes, and
-        // promising a size it does not know is how a renderer stalls waiting for bytes that
-        // were never coming. Seeking is done by starting a new stream at an offset instead,
-        // which every renderer supports because it is just another URL.
+        // Primed before a single header goes out. A renderer gives a server a few seconds to
+        // start talking, and the first thing this one does is fetch a six-second piece of video
+        // over the internet — so answering first and fetching afterwards is a set that gives up
+        // and says it cannot reach the network. The first piece is in hand before the reply is.
+        val first = if (headOnly) null else prime(feed, media, startMs)
+        if (!headOnly && first == null) return
+
+        // Chunked, not a connection that simply ends. A stream assembled as it goes has no
+        // length to promise, and of the two ways HTTP allows that, the strict renderers accept
+        // this one: close-delimited bodies are an HTTP/1.0 habit that several televisions treat
+        // as a truncated file, which they report as a format they cannot play.
+        val chunked = !request.contains("HTTP/1.0")
         output.write(
             (
                 "HTTP/1.1 200 OK\r\n" +
                     "Content-Type: $contentType\r\n" +
                     "Accept-Ranges: none\r\n" +
+                    (if (chunked) "Transfer-Encoding: chunked\r\n" else "") +
                     "transferMode.dlna.org: Streaming\r\n" +
                     "contentFeatures.dlna.org: DLNA.ORG_OP=00;DLNA.ORG_CI=0;" +
                     "DLNA.ORG_FLAGS=8D500000000000000000000000000000\r\n" +
@@ -234,23 +262,28 @@ class StreamRelay(
         if (headOnly) return
 
         streaming = true
-        runCatching { pump(feed, media, startMs, output) }
-        output.flush()
+        val body = if (chunked) ChunkedOutput(output) else output
+        runCatching {
+            first!!.pieces.forEach { body.write(it) }
+            pump(feed, first.media, first.nextSequence, body)
+        }
+        runCatching { body.flush() }
+        runCatching { if (body is ChunkedOutput) body.finish() }
     }
 
-    /**
-     * Feeds the pieces out in order, for as long as the television is listening.
-     *
-     * A live stream has no end: when the list runs out the playlist is fetched again and
-     * anything new is appended, which is exactly what the phone's own player does. A recording
-     * simply ends, and the closed connection is what tells the renderer the film is over.
-     */
-    private fun pump(feed: Source, first: HlsPlaylist.Media, startMs: Long, output: OutputStream) {
-        var media = first
-        first.initUrl?.let { init -> fetchSegment(feed, init)?.let { output.write(it) } }
+    /** The first pieces of the stream, fetched before the receiver is answered. */
+    private class Primed(
+        val pieces: List<ByteArray>,
+        val media: HlsPlaylist.Media,
+        val nextSequence: Long,
+    )
+
+    private fun prime(feed: Source, media: HlsPlaylist.Media, startMs: Long): Primed? {
+        val pieces = mutableListOf<ByteArray>()
+        media.initUrl?.let { init -> fetchSegment(feed, init)?.let { pieces += it } }
 
         var elapsed = 0L
-        var next = media.segments.first().sequence
+        var next = media.segments.firstOrNull()?.sequence ?: return null
         media.segments.forEach { segment ->
             if (elapsed + segment.durationMs > startMs) return@forEach
             elapsed += segment.durationMs
@@ -262,6 +295,47 @@ class StreamRelay(
             next = (media.segments.last().sequence - LIVE_EDGE_SEGMENTS).coerceAtLeast(next)
         }
 
+        val opening = media.segments.firstOrNull { it.sequence >= next } ?: return null
+        val bytes = fetchSegment(feed, opening.url) ?: return null
+        pieces += decryptIfNeeded(feed, opening, bytes) ?: return null
+        return Primed(pieces, media, opening.sequence + 1)
+    }
+
+    /**
+     * HTTP's own framing for a body whose length is not known in advance.
+     *
+     * Written out rather than pulled in, because the whole of it is a length in hexadecimal
+     * followed by the bytes, and a stream relay that cannot be read in one sitting is not worth
+     * having.
+     */
+    private class ChunkedOutput(private val sink: OutputStream) : OutputStream() {
+        override fun write(byte: Int) = write(byteArrayOf(byte.toByte()), 0, 1)
+
+        override fun write(bytes: ByteArray, offset: Int, length: Int) {
+            if (length <= 0) return
+            sink.write("${length.toString(16)}\r\n".toByteArray())
+            sink.write(bytes, offset, length)
+            sink.write("\r\n".toByteArray())
+        }
+
+        override fun flush() = sink.flush()
+
+        fun finish() {
+            sink.write("0\r\n\r\n".toByteArray())
+            sink.flush()
+        }
+    }
+
+    /**
+     * Feeds the pieces out in order, for as long as the television is listening.
+     *
+     * A live stream has no end: when the list runs out the playlist is fetched again and
+     * anything new is appended, which is exactly what the phone's own player does. A recording
+     * simply ends, and the closed connection is what tells the renderer the film is over.
+     */
+    private fun pump(feed: Source, first: HlsPlaylist.Media, from: Long, output: OutputStream) {
+        var media = first
+        var next = from
         var idle = 0
         while (streaming) {
             val pending = media.segments.filter { it.sequence >= next }
@@ -407,6 +481,7 @@ class StreamRelay(
      * which it has never seen.
      */
     private fun passThrough(feed: Source, range: String?, headOnly: Boolean, output: OutputStream) {
+        wasFetched = true
         val connection = open(feed, feed.playlistUrl) ?: return
         if (!range.isNullOrBlank()) connection.setRequestProperty("Range", range)
         try {
@@ -415,7 +490,9 @@ class StreamRelay(
                 output.write("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
                 return
             }
-            val type = connection.contentType?.substringBefore(';')?.trim() ?: "video/mp4"
+            val type = contentTypeOverride
+                ?: connection.contentType?.substringBefore(';')?.trim()
+                ?: "video/mp4"
             val length = connection.getHeaderField("Content-Length")
             val contentRange = connection.getHeaderField("Content-Range")
             output.write(
@@ -467,13 +544,28 @@ class StreamRelay(
 
     companion object {
         /** The address the receiver can reach this phone at, which is the Wi-Fi one. */
-        fun localAddress(): String? = runCatching {
-            NetworkInterface.getNetworkInterfaces().toList()
+        fun localAddress(peer: String? = null): String? = runCatching {
+            val candidates = NetworkInterface.getNetworkInterfaces().toList()
                 .filter { it.isUp && !it.isLoopback }
-                .flatMap { it.inetAddresses.toList() }
-                .firstOrNull { it.address.size == 4 && it.isSiteLocalAddress }
-                ?.hostAddress
+                .flatMap { network -> network.inetAddresses.toList().map { network to it } }
+                .filter { (_, address) -> address.address.size == 4 && address.isSiteLocalAddress }
+
+            // The address has to be reachable *from the television*, which is not the same as
+            // "an address this phone has". A phone on a VPN, or with a hotspot up, has several
+            // — and handing out the wrong one is a set that says it cannot reach the network,
+            // because it cannot. The one on the receiver's own subnet is the right one.
+            val onPeerNetwork = peer?.let { host ->
+                candidates.firstOrNull { (_, address) -> sameNetwork(address.hostAddress, host) }
+            }
+            val wifi = candidates.firstOrNull { (network, _) -> network.name.startsWith("wlan") }
+            (onPeerNetwork ?: wifi ?: candidates.firstOrNull())?.second?.hostAddress
         }.getOrNull()
+
+        /** Whether two addresses are on the same /24, which is what a home network is. */
+        internal fun sameNetwork(a: String?, b: String?): Boolean {
+            if (a == null || b == null) return false
+            return a.substringBeforeLast('.') == b.substringBeforeLast('.')
+        }
 
         /** A receiver is on the same network. Anything else has no business here. */
         internal fun isLocal(address: InetAddress?): Boolean =

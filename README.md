@@ -310,6 +310,30 @@ refuses anything that is not on the local network, and can be asked for exactly 
 stream the user chose. No part of a request names an address to fetch, so it is not a proxy for
 anything else, and the television is handed a local address with no credentials anywhere in it.
 
+**Asking rather than guessing.** "File format not supported" is almost never a television that
+cannot decode a video. It is a television handed a media type that is not on its list, refusing
+before it decodes anything — the identical bytes under a name it knows play perfectly. A Samsung
+set publishes `video/mpeg` and not `video/mp2t`, and those are the same transport stream. Every
+renderer will list what it accepts, through `GetProtocolInfo`, and that list is now read on
+connecting and used to name the stream. A set that publishes no list is offered the container's
+names in turn — four at most, ending in a refusal rather than another attempt — because a device
+that says nothing deserves a fair hearing and not a guess dressed up as one. When nothing fits,
+the refusal says what the set does play, in its own vocabulary.
+
+The rest of the shape follows the same rule: be the thing the receiver expects. The stream is
+framed with HTTP's chunked encoding rather than a connection that simply ends, because a
+close-delimited body is an HTTP/1.0 habit that strict sets read as a truncated file. The first
+piece of video is fetched before the reply's headers go out, since a renderer allows a server a
+few seconds to start talking and fetching six seconds of video over the internet takes longer
+than that — answering first is how a television concludes the network is broken. And the address
+it is given is the phone's address *on the receiver's own subnet*, because a phone with a VPN or
+a hotspot has several and only one of them is reachable from the set.
+
+When a television still refuses, the two possible causes are told apart by whether it ever came
+and asked the phone for the stream: one that fetched and then stopped could not decode it, and
+one that never fetched could not reach the phone. They need completely different answers, and
+neither of them is "check your network connection".
+
 Seeking follows from that. A reassembled stream has no length and no byte ranges, so a seek is
 not a seek: the renderer is handed the same stream again, started at the second the viewer asked
 for. That is an operation every renderer supports, because it is just another address. Where the
@@ -338,6 +362,12 @@ across a navigation, for exactly as long as the receiver has the media. The brow
 surface goes flat, with the receiver's name on it, because a paused frame of somebody's film
 with a play button over it reads as "the phone is the player" at the moment it has stopped being
 one.
+
+One thread runs the commands, in the order they were asked for, and nothing that loops is
+allowed on it. That is not tidiness: the position poller used to share it, and because it loops
+for the length of a session it held that thread for the length of the session — so every seek,
+pause and volume change queued behind it and was never sent. A command that is merely slow is a
+bug; a command that never happens looks like a feature that does not work.
 
 The transport is the same transport. Position, duration and playback state come from the
 receiver and the same buttons drive it — one set of controls, two backends, rather than a second

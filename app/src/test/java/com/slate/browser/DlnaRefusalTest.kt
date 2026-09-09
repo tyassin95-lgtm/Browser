@@ -93,4 +93,29 @@ class DlnaRefusalTest {
         assertNull(controller.stageFor("STOPPED"))
         assertNull(controller.stageFor("NO_MEDIA_PRESENT"))
     }
+
+    @Test
+    fun `a set that never fetched the stream is a network problem, not a format one`() {
+        // The two failures look identical from the renderer's status and are completely
+        // different problems: one set could not decode what it was sent, the other never
+        // reached the phone at all. Telling them apart is the difference between a fix and a
+        // shrug.
+        val unsupported = controller.unsupportedMessage("Samsung TV")
+        assertTrue(unsupported, unsupported.contains("Samsung TV"))
+        assertTrue("with nothing declared, the message stays general", unsupported.contains("won't play"))
+    }
+
+    @Test
+    fun `anything that loops runs off the thread the commands use`() {
+        // The bug this exists for: the position poller ran on the same single thread as every
+        // command, and it loops for the length of the session — so seek, pause and volume were
+        // not slow, they were never sent. Watchers now get a thread of their own, which is what
+        // the poller is started as.
+        val ran = java.util.concurrent.CompletableFuture<String>()
+        controller.watcher("slate-dlna-test") { ran.complete(Thread.currentThread().name) }
+
+        val where = ran.get(2, java.util.concurrent.TimeUnit.SECONDS)
+        assertEquals("slate-dlna-test", where)
+        assertTrue("never the command thread", where != "slate-dlna")
+    }
 }

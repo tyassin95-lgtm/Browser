@@ -175,6 +175,7 @@ class DlnaClient(context: Context) {
     companion object {
         const val AV_TRANSPORT = "urn:schemas-upnp-org:service:AVTransport:1"
         const val RENDERING_CONTROL = "urn:schemas-upnp-org:service:RenderingControl:1"
+        const val CONNECTION_MANAGER = "urn:schemas-upnp-org:service:ConnectionManager:1"
 
         private const val SSDP_ADDRESS = "239.255.255.250"
         private const val SSDP_PORT = 1900

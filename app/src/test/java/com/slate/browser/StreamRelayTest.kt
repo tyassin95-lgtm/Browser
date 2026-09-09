@@ -138,19 +138,42 @@ class StreamRelayTest {
         userAgent = "Vox/1.0",
     )
 
-    /** Reads a relayed stream the way a television does: one GET, then bytes until it ends. */
-    private fun fetch(url: String): ByteArray {
+    /**
+     * Reads a relayed stream the way a television does: one GET, then the body — which for a
+     * stream of unknown length arrives in HTTP's chunked framing, exactly as the strict
+     * renderers require.
+     */
+    private fun fetch(url: String): ByteArray = raw(url).let { (head, body) ->
+        if (head.contains("Transfer-Encoding: chunked", ignoreCase = true)) dechunk(body) else body
+    }
+
+    private fun raw(url: String): Pair<String, ByteArray> {
         val address = java.net.URL(url)
         Socket(address.host, address.port).use { socket ->
             socket.soTimeout = 10_000
             socket.getOutputStream().write(
                 ("GET ${address.file} HTTP/1.1\r\nHost: ${address.host}\r\n\r\n").toByteArray(),
             )
-            val input = socket.getInputStream()
-            val all = input.readBytes()
+            val all = socket.getInputStream().readBytes()
             val split = indexOfHeaderEnd(all)
-            return all.copyOfRange(split, all.size)
+            return String(all.copyOfRange(0, split)) to all.copyOfRange(split, all.size)
         }
+    }
+
+    /** Undoes the framing: a length in hexadecimal, the bytes, and a zero-length chunk at the end. */
+    private fun dechunk(body: ByteArray): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        var index = 0
+        while (index < body.size) {
+            var end = index
+            while (end + 1 < body.size && !(body[end] == 13.toByte() && body[end + 1] == 10.toByte())) end++
+            val size = String(body, index, end - index).trim().toIntOrNull(16) ?: break
+            if (size == 0) break
+            val start = end + 2
+            out.write(body, start, size)
+            index = start + size + 2
+        }
+        return out.toByteArray()
     }
 
     private fun headersOf(url: String): String {
@@ -291,5 +314,55 @@ class StreamRelayTest {
         }
         val forwarded = synchronized(seen) { seen.last { it.contains("seg-0.ts") } }
         assertTrue("the range must reach the origin:\n$forwarded", forwarded.contains("Range: bytes=10-20"))
+    }
+
+    @Test
+    fun `a stream of unknown length is framed the way strict renderers require`() {
+        // A body that simply ends when the connection does is an HTTP\/1.0 habit, and several
+        // televisions read the closed socket as a truncated file — which they report as a
+        // format they cannot play.
+        val published = relay.publish(source("/hls/master.m3u8"))!!
+        val (head, _) = raw(published.url)
+        assertTrue(head, head.contains("Transfer-Encoding: chunked"))
+        assertTrue(head, head.contains("transferMode.dlna.org: Streaming"))
+    }
+
+    @Test
+    fun `the stream is named whatever the television calls it`() {
+        val published = relay.publish(source("/hls/master.m3u8"))!!
+        // A set that lists video\/mpeg and not video\/mp2t plays the same bytes under the name
+        // it knows, and refuses them under the one it does not.
+        relay.contentTypeOverride = "video/mpeg"
+        val (head, _) = raw(published.url)
+        assertTrue(head, head.contains("Content-Type: video/mpeg"))
+    }
+
+    @Test
+    fun `the first piece is in hand before the receiver is answered`() {
+        // A renderer allows a server a few seconds to start talking. Answering and then going
+        // off to fetch six seconds of video over the internet is how a television decides the
+        // network is broken.
+        val published = relay.publish(source("/hls/master.m3u8"))!!
+        val before = synchronized(seen) { seen.count { it.contains("seg-0.ts") } }
+        raw(published.url)
+        val after = synchronized(seen) { seen.count { it.contains("seg-0.ts") } }
+        assertTrue("the opening piece must be fetched as part of answering", after > before)
+    }
+
+    @Test
+    fun `a receiver that never asked is not a receiver that refused`() {
+        val published = relay.publish(source("/hls/master.m3u8"))!!
+        assertTrue("nothing has asked yet", !relay.wasFetched)
+        fetch(published.url)
+        assertTrue("and now something has", relay.wasFetched)
+    }
+
+    @Test
+    fun `the address offered is one the receiver can actually reach`() {
+        // A phone with a VPN up, or a hotspot, has several addresses, and only one of them is
+        // on the television's network. Handing out either of the others is a set reporting that
+        // it cannot reach the network, because it cannot.
+        assertTrue(StreamRelay.sameNetwork("192.168.1.40", "192.168.1.9"))
+        assertTrue(!StreamRelay.sameNetwork("10.8.0.2", "192.168.1.9"))
     }
 }

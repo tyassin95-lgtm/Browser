@@ -7,6 +7,7 @@ import android.webkit.CookieManager
 import android.webkit.WebSettings
 import com.slate.browser.cast.hls.StreamRelay
 import com.slate.browser.cast.dlna.DlnaClient
+import com.slate.browser.cast.dlna.MediaTypes
 import com.slate.browser.cast.dlna.SoapResult
 import com.slate.browser.cast.dlna.UpnpParsing
 import com.slate.browser.cast.dlna.UpnpRenderer
@@ -27,8 +28,23 @@ class DlnaController(context: Context) {
 
     private val client = DlnaClient(context)
     private val main = Handler(Looper.getMainLooper())
+    /**
+     * Commands, in the order they were asked for, on a thread of their own.
+     *
+     * One thread keeps a play from overtaking the pause before it, which on a renderer is the
+     * difference between what the viewer asked for and the opposite. What must never share it is
+     * anything that does not end: the poller used to run here, and because it loops for the
+     * length of the session it held this thread for the length of the session — so every seek,
+     * every pause and every volume change queued behind it and was never sent at all. That is
+     * not a slow command. It is a command that does not happen.
+     */
     private val background = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "slate-dlna").apply { isDaemon = true }
+    }
+
+    /** Anything that waits or loops, kept well away from the commands. */
+    internal fun watcher(name: String, work: () -> Unit) {
+        Thread({ runCatching { work() } }, name).apply { isDaemon = true }.start()
     }
 
     private var renderers: List<UpnpRenderer> = emptyList()
@@ -43,6 +59,23 @@ class DlnaController(context: Context) {
 
     /** What the relayed stream is, so a seek hands the renderer the same thing again. */
     @Volatile private var relaySource: CastSource? = null
+
+    /**
+     * What the connected renderer said it can play.
+     *
+     * Read once, on connecting, and used to name every stream afterwards. Empty when the device
+     * would not say, which is treated as "let it decide" rather than as "it accepts nothing".
+     */
+    @Volatile private var accepts: Set<String> = emptySet()
+
+    /**
+     * The names already offered to a renderer that would not publish its list.
+     *
+     * With no list to read there is nothing to reason from, so the container's names are offered
+     * in turn and the device answers with its behaviour. Bounded, remembered, and ending in a
+     * refusal rather than another attempt.
+     */
+    private val namesTried = mutableSetOf<String>()
 
     /** Where the relayed stream was started from, since the renderer counts from zero. */
     @Volatile private var baseOffsetMs = 0L
@@ -69,6 +102,9 @@ class DlnaController(context: Context) {
      * would read the browser's own seek as somebody switching the television off.
      */
     @Volatile private var ignoreStopsUntil = 0L
+
+    /** When the renderer was last handed an address, so a stale watch does not fire on a new one. */
+    @Volatile private var handedOverAt = 0L
 
     private val userAgent: String =
         runCatching { WebSettings.getDefaultUserAgent(context) }.getOrDefault("")
@@ -98,7 +134,10 @@ class DlnaController(context: Context) {
         wantActive = active
         if (!active || discovering) return
         discovering = true
-        background.execute {
+        // Searching runs for as long as the picker is open, which is exactly the shape that must
+        // not be on the command thread: choosing a device is a command, and it would have been
+        // queued behind the search it ended.
+        watcher("slate-dlna-search") {
             // Searched repeatedly while the picker is up: SSDP has no completion, devices
             // answer late, and a television that was asleep when the first search went out
             // will answer the second.
@@ -139,6 +178,8 @@ class DlnaController(context: Context) {
             update { it.copy(stage = CastStage.FAILED, message = "That device is no longer nearby.") }
             return
         }
+        namesTried.clear()
+        accepts = emptySet()
         update { it.copy(stage = CastStage.CONNECTING, deviceName = renderer.name, message = "") }
         background.execute {
             val reply = client.call(
@@ -159,6 +200,16 @@ class DlnaController(context: Context) {
                 }
                 return@execute
             }
+            // While we have its attention: what does it actually play? Guessing at this is what
+            // produces "File format not supported" on a set that would have played the same
+            // bytes under a name it recognises.
+            accepts = renderer.connectionManagerUrl
+                ?.let {
+                    client.invoke(it, DlnaClient.CONNECTION_MANAGER, "GetProtocolInfo", "")
+                }
+                ?.let { UpnpParsing.sinkTypes(it) }
+                .orEmpty()
+
             connected = renderer
             update { it.copy(stage = CastStage.CONNECTED, deviceName = renderer.name, message = "") }
         }
@@ -271,11 +322,27 @@ class DlnaController(context: Context) {
         // The renderer is about to stop and start, because that is what being given a new
         // address means. That is not the television being switched off.
         ignoreStopsUntil = System.currentTimeMillis() + HANDOVER_SETTLE_MS
+        handedOverAt = System.currentTimeMillis()
+
+        // The name the receiver knows this container by. A television that lists video/mpeg and
+        // not video/mp2t plays the identical bytes under the first name and refuses them under
+        // the second, and no amount of trying again changes that.
+        val named = if (accepts.isEmpty()) {
+            MediaTypes.namesFor(source.contentType).firstOrNull { it !in namesTried }
+        } else {
+            MediaTypes.nameFor(source.contentType, accepts)
+        }
+        if (named == null) {
+            update { it.copy(stage = CastStage.FAILED, message = unsupportedMessage(renderer.name)) }
+            return
+        }
+        namesTried += named
+        relay.contentTypeOverride = if (relaying || relaySource != null) named else null
 
         val metadata = UpnpParsing.didl(
             title = castable.title,
             url = url,
-            contentType = source.contentType,
+            contentType = named,
             isLive = castable.isLive || relaying,
         )
         val set = client.call(
@@ -311,6 +378,68 @@ class DlnaController(context: Context) {
             )
         }
         startPolling()
+        watchForSilentRefusal(renderer, relaySource != null)
+    }
+
+    /**
+     * Offers the same stream under the next name the container goes by.
+     *
+     * Only for a device that published no list, only for a stream this phone is serving, and
+     * only for as many names as the container actually has. It is how a set that says nothing is
+     * given a fair hearing without the browser pretending to know something it does not.
+     */
+    private fun retryUnderAnotherName(): Boolean {
+        if (accepts.isNotEmpty() || !relay.wasFetched) return false
+        val renderer = connected ?: return false
+        val castable = loaded ?: return false
+        val source = relaySource ?: return false
+        val untried = MediaTypes.namesFor(source.contentType).any { it !in namesTried }
+        if (!untried) return false
+        background.execute { hand(renderer, castable, source, state.positionMs) }
+        return true
+    }
+
+    /**
+     * A television that accepted the address and then showed an error of its own.
+     *
+     * There is no protocol for this: `SetAVTransportURI` succeeds, `Play` succeeds, and the set
+     * puts "File format not supported" on the screen while reporting STOPPED as though nothing
+     * had happened. What separates the two possible causes is whether it ever came and asked the
+     * phone for the stream — a set that fetched and then stopped could not decode it, and a set
+     * that never fetched could not reach the phone at all. Both are worth saying out loud, and
+     * neither is "check your network connection".
+     */
+    private fun watchForSilentRefusal(renderer: UpnpRenderer, throughRelay: Boolean) {
+        if (!throughRelay) return
+        val startedAt = System.currentTimeMillis()
+        watcher("slate-dlna-watch") {
+            Thread.sleep(REFUSAL_WINDOW_MS)
+            // A newer hand-over has happened since; this watch is about something that is no
+            // longer on screen.
+            if (connected?.udn != renderer.udn || handedOverAt > startedAt) return@watcher
+            if (relay.wasFetched) return@watcher
+            update {
+                CastState(
+                    stage = CastStage.FAILED,
+                    devices = it.devices,
+                    message = "${renderer.name} never fetched the stream from this phone. " +
+                        "They may be on different networks — check they are both on the same " +
+                        "Wi-Fi, and that it is not a guest network.",
+                )
+            }
+            stopRelay()
+        }
+    }
+
+    /** Its own vocabulary, so the sentence is about this television rather than televisions. */
+    internal fun unsupportedMessage(deviceName: String): String {
+        val plays = MediaTypes.describe(accepts)
+        return if (plays.isBlank()) {
+            "$deviceName won't play this video. Screen mirroring will show it."
+        } else {
+            "$deviceName only plays $plays, and this isn't one of them. " +
+                "Screen mirroring will show it."
+        }
     }
 
     /**
@@ -483,7 +612,7 @@ class DlnaController(context: Context) {
     private fun startPolling() {
         if (polling) return
         polling = true
-        background.execute {
+        watcher("slate-dlna-poll") {
             var silences = 0
             var everStarted = false
             var stops = 0
@@ -503,7 +632,7 @@ class DlnaController(context: Context) {
                     // a network that has gone, and either way there is no session left.
                     if (silences >= MAX_SILENCES) {
                         connectionLost(renderer.name)
-                        return@execute
+                        return@watcher
                     }
                     runCatching { Thread.sleep(POLL_INTERVAL_MS) }
                     continue
@@ -522,8 +651,18 @@ class DlnaController(context: Context) {
                 val ourDoing = System.currentTimeMillis() < ignoreStopsUntil
                 stops = if (stopped && everStarted && !ourDoing) stops + 1 else 0
                 if (stops >= MAX_STOPS) {
+                    // A renderer that fetched the stream and then stopped it did not like what
+                    // it got. When it never told us what it does like, there is another name to
+                    // try before giving up — and when it did, its list has already been obeyed
+                    // and a stop is a stop.
+                    if (retryUnderAnotherName()) {
+                        stops = 0
+                        everStarted = false
+                        runCatching { Thread.sleep(POLL_INTERVAL_MS) }
+                        continue
+                    }
                     stoppedOnDevice()
-                    return@execute
+                    return@watcher
                 }
                 stageFor(reported)?.let { stage -> update { it.copy(stage = stage) } }
 
@@ -612,6 +751,7 @@ class DlnaController(context: Context) {
     private fun stopRelay() {
         relaying = false
         relaySource = null
+        namesTried.clear()
         baseOffsetMs = 0
         knownDurationMs = 0
         runCatching { relay.stop() }
@@ -630,6 +770,7 @@ class DlnaController(context: Context) {
         private const val SEEK_SETTLE_MS = 6_000L
         private const val SEEK_TOLERANCE_MS = 2_000L
         private const val HANDOVER_SETTLE_MS = 8_000L
+        private const val REFUSAL_WINDOW_MS = 6_000L
         private const val MAX_STOPS = 2
 
         // AVTransport's own words for what a renderer is doing.

@@ -12,6 +12,15 @@ data class UpnpRenderer(
     val name: String,
     val avTransportUrl: String,
     val renderingControlUrl: String?,
+    /**
+     * Where to ask what this device can actually play.
+     *
+     * The single most useful thing a renderer will tell you, and the one this browser was not
+     * asking: a list of exactly which media types it accepts. Guessing instead is what produces
+     * "File format not supported" on a television that would have played the same video happily
+     * under a name it recognised.
+     */
+    val connectionManagerUrl: String? = null,
 )
 
 /** A renderer's refusal, in the numbers the specification defines. */
@@ -49,6 +58,7 @@ object UpnpParsing {
         var udn: String? = null
         var avTransport: String? = null
         var renderingControl: String? = null
+        var connectionManager: String? = null
 
         // Service entries are read as they close, because serviceType and controlURL are
         // siblings and either may come first.
@@ -90,6 +100,8 @@ object UpnpParsing {
                                         avTransport = resolve(location, url)
                                     type.contains("RenderingControl", true) ->
                                         renderingControl = resolve(location, url)
+                                    type.contains("ConnectionManager", true) ->
+                                        connectionManager = resolve(location, url)
                                 }
                             }
                         }
@@ -105,6 +117,7 @@ object UpnpParsing {
             name = friendlyName?.takeIf { it.isNotBlank() } ?: hostOf(location),
             avTransportUrl = control,
             renderingControlUrl = renderingControl,
+            connectionManagerUrl = connectionManager,
         )
     }.getOrNull()
 
@@ -134,6 +147,24 @@ object UpnpParsing {
     fun faultOf(xml: String): UpnpFault? {
         val code = soapValue(xml, "errorCode")?.trim()?.toIntOrNull() ?: return null
         return UpnpFault(code, soapValue(xml, "errorDescription")?.trim().orEmpty())
+    }
+
+    /**
+     * The media types a renderer says it accepts, from its `GetProtocolInfo` reply.
+     *
+     * The reply is a comma-separated list of `protocolInfo` strings — `http-get:*:video/mp4:*`
+     * and so on — and the third field of each is the type. Everything else in the entry is the
+     * device's own profile vocabulary, which varies by manufacturer and says nothing a browser
+     * can use; the type is the part that decides whether a stream is even offered.
+     */
+    fun sinkTypes(xml: String): Set<String> {
+        val sink = soapValue(xml, "Sink").orEmpty()
+        return sink.split(',')
+            .mapNotNull { entry ->
+                val fields = entry.trim().split(':')
+                fields.getOrNull(2)?.trim()?.lowercase()?.takeIf { it.contains('/') }
+            }
+            .toSet()
     }
 
     /** `H:MM:SS` or `HH:MM:SS.mmm`, as position and duration both arrive. */
