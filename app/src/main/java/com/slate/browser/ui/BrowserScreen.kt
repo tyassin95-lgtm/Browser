@@ -175,6 +175,10 @@ fun BrowserScreen(
                     .background(MaterialTheme.colorScheme.surface)
                     .onSizeChanged { size ->
                         chromeHeight = with(density) { size.height.toDp() }
+                        // The scroll policy needs this in pixels: it is exactly how far a page
+                        // moves when the chrome comes and goes, and therefore exactly how much
+                        // movement is the browser's own rather than the reader's.
+                        viewModel.chromeHeightPx = size.height.toFloat()
                     }
                     .windowInsetsPadding(systemChromeInsets().only(barSides)),
             ) {

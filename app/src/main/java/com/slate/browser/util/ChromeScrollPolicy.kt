@@ -20,7 +20,19 @@ import kotlin.math.abs
  *    rather than four times more sensitive on a 4x panel;
  *  - a single frame too large to have come from a finger is ignored, because that is the
  *    signature of the resize we ourselves just caused — which is what would otherwise close a
- *    feedback loop of resize, scroll, resize.
+ *    feedback loop of resize, scroll, resize;
+ *  - the movement our own resize causes is absorbed exactly, rather than being hoped to fall
+ *    outside a threshold, because it does not;
+ *  - and at the very bottom of a page the decision is frozen, because that is where a page has
+ *    no room to absorb the resize and every clamp becomes another scroll event.
+ *
+ * The last two exist because of a loop that was visible on any long page. Hiding the toolbar
+ * makes the WebView taller, which shortens the page's scroll range; at the bottom the engine has
+ * to clamp the scroll position by exactly the toolbar's height, and reports that clamp as an
+ * upward scroll. An upward scroll of a toolbar's height is far past the threshold for showing
+ * the toolbar — so it came back, which shortened the viewport, which let the next downward pixel
+ * hide it again. The toolbar flickered on and off for as long as a finger stayed near the
+ * bottom of the page, and every step of it was the browser reacting to itself.
  *
  * The result is only a decision. Applying it waits for scrolling to stop; see the caller.
  */
@@ -30,23 +42,49 @@ class ChromeScrollPolicy(density: Float) {
     private val showDistancePx = SHOW_DISTANCE_DP * density
     private val topSlopPx = TOP_SLOP_DP * density
     private val implausibleFramePx = IMPLAUSIBLE_FRAME_DP * density
+    private val absorbSlopPx = ABSORB_SLOP_DP * density
 
     private var travel = 0f
     private var movingDown = true
+
+    /**
+     * Movement still to be discounted as the browser's own.
+     *
+     * Set to the height of the chrome whenever the chrome changes, because that is exactly how
+     * far the engine may move the page in response — no more and no less. Spending it, rather
+     * than waiting out a timer, means a real gesture in the same moment is still felt: only the
+     * pixels the resize can account for are ignored.
+     */
+    private var absorb = 0f
 
     /** What the chrome should end up doing once the page stops moving. */
     var desired: Boolean = true
         private set
 
-    fun onScroll(deltaPx: Int, scrollY: Int) {
+    fun onScroll(deltaPx: Int, scrollY: Int, atBottom: Boolean = false) {
         // The top of a page always shows the toolbar: there is nothing above to reveal.
         if (scrollY <= topSlopPx) {
             travel = 0f
+            absorb = 0f
             desired = true
             return
         }
         if (deltaPx == 0) return
         if (abs(deltaPx) > implausibleFramePx) {
+            travel = 0f
+            return
+        }
+        if (absorb > 0f) {
+            absorb -= abs(deltaPx.toFloat())
+            if (absorb <= 0f) absorb = 0f
+            travel = 0f
+            return
+        }
+        // At the bottom there is nothing left to reveal by scrolling further, and no room for
+        // the page to take up the change in the viewport's height — so every adjustment lands
+        // back here as another scroll event. Whatever the toolbar is doing when the page runs
+        // out, it goes on doing.
+        if (atBottom) {
             travel = 0f
             return
         }
@@ -68,6 +106,20 @@ class ChromeScrollPolicy(density: Float) {
     fun reset(visible: Boolean) {
         desired = visible
         travel = 0f
+        absorb = 0f
+    }
+
+    /**
+     * The chrome has just appeared or disappeared, and the page is about to move because of it.
+     *
+     * [chromeHeightPx] is the whole of the movement the engine can produce in response: the
+     * WebView changed height by exactly that much, so a page against its end can be clamped by
+     * exactly that much. Discounting it is what keeps the browser from reading its own resize as
+     * the user asking for the toolbar back.
+     */
+    fun onChromeChanged(chromeHeightPx: Float) {
+        travel = 0f
+        absorb = chromeHeightPx.coerceAtLeast(0f) + absorbSlopPx
     }
 
     private fun settle(value: Boolean) {
@@ -83,6 +135,12 @@ class ChromeScrollPolicy(density: Float) {
         const val SHOW_DISTANCE_DP = 32f
 
         const val TOP_SLOP_DP = 16f
+
+        /**
+         * A little more than the chrome's height, since a relayout can carry a page a pixel or
+         * two further than the height that caused it.
+         */
+        const val ABSORB_SLOP_DP = 8f
 
         /** No finger moves a page this far between two frames; a relayout does. */
         const val IMPLAUSIBLE_FRAME_DP = 240f

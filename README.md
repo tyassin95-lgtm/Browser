@@ -231,7 +231,19 @@ discarded on reversal, distances are in dp so a 4x panel is not four times more 
 frame too large to have come from a finger is ignored — that is the signature of the browser's
 own resize, and acting on it closes a loop of resize, scroll, resize — and the change itself
 waits for scrolling to stop. One resize on a still page is invisible; the same resize under a
-live compositor is what tears, and doing it every frame tears continuously. The page and the
+live compositor is what tears, and doing it every frame tears continuously.
+
+Two of those rules exist because "a frame too large to have come from a finger" is not enough to
+recognise the browser's own doing. Hiding the toolbar makes the WebView taller, which shortens
+the page's scroll range, and at the foot of a page the engine has to claw the scroll position
+back by exactly the toolbar's height — reporting it as an upward scroll of a perfectly plausible
+size, and comfortably past the threshold for bringing the toolbar back. Which shortened the
+viewport, which let the next pixel downward hide it again: a toolbar that flickered on and off
+for as long as a finger stayed near the bottom of a long page, every step of it the browser
+reacting to itself. So the movement a resize can produce is now discounted *exactly* — the
+layout reports the chrome's measured height, and precisely that many pixels are absorbed, so a
+genuine reach for the toolbar in the same moment is still felt — and at the very end of a page,
+where there is no room left to absorb anything, the toolbar simply holds whatever it was doing. The page and the
 WebView are both painted opaque so the compositor is handed a finished layer rather than
 blending one, and no gap can expose the previous frame.
 

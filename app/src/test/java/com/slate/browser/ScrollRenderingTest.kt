@@ -120,8 +120,8 @@ class ScrollRenderingTest {
 
     private var observedDuringScroll: (() -> Unit)? = null
 
-    private fun feed(delta: Int, y: Int) {
-        viewModel.onPageScrolled(delta, y)
+    private fun feed(delta: Int, y: Int, atBottom: Boolean = false) {
+        viewModel.onPageScrolled(delta, y, atBottom)
         // The main looper runs between scroll frames on a device too.
         shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(16))
         observedDuringScroll?.invoke()
@@ -369,5 +369,36 @@ class ScrollRenderingTest {
         override fun openCastSettings(): Boolean = false
     override fun toast(message: String) = Unit
         override fun snack(message: String, actionLabel: String?, action: (() -> Unit)?) = Unit
+    }
+
+    @Test
+    fun `the toolbar stops flickering at the foot of a long page`() {
+        // What this reproduces: a reader arrives at the bottom, the toolbar hides, the WebView
+        // grows by its height, the page's scroll range shrinks, and the engine clamps the
+        // position by exactly that height — which arrives as an upward scroll big enough to
+        // bring the toolbar straight back. Then down, then up, for as long as a finger keeps
+        // nudging the end of the page.
+        render()
+        viewModel.chromeHeightPx = dp(84f).toFloat()
+
+        var y = 0
+        repeat(8) {
+            y += dp(30f)
+            feed(dp(30f), y)
+        }
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(400))
+        assertFalse("a decisive scroll hides it", viewModel.chromeVisible)
+
+        val changes = countChromeChanges {
+            repeat(12) {
+                // The clamp the browser causes itself, then the reader still pushing down.
+                feed(-dp(84f), y - dp(84f), atBottom = true)
+                shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(200))
+                feed(dp(30f), y, atBottom = true)
+                shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(200))
+            }
+        }
+        assertEquals("the toolbar must hold still at the end of a page", 0, changes)
+        assertFalse(viewModel.chromeVisible)
     }
 }

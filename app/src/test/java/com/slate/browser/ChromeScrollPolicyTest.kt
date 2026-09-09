@@ -132,4 +132,89 @@ class ChromeScrollPolicyTest {
         policy.onScroll(dp(20f), y)
         assertTrue(policy.desired)
     }
+
+    @Test
+    fun `the browser does not read its own resize as the reader scrolling`() {
+        // The loop that made the toolbar flicker at the foot of every long page. Hiding it makes
+        // the WebView taller, the page's scroll range shorter, and the engine clamps the
+        // position by exactly the toolbar's height — reporting that clamp as an upward scroll
+        // far larger than the threshold for bringing the toolbar back.
+        val policy = policy()
+        var y = 4_000
+        repeat(6) {
+            y += dp(20f)
+            policy.onScroll(dp(20f), y)
+        }
+        assertFalse("a decisive scroll down hides it", policy.desired)
+
+        val chromeHeight = dp(84f)
+        policy.onChromeChanged(chromeHeight.toFloat())
+        // The clamp, arriving as an upward scroll of exactly that height.
+        y -= chromeHeight
+        policy.onScroll(-chromeHeight, y)
+
+        assertFalse("the toolbar must not come back on the browser's own doing", policy.desired)
+    }
+
+    @Test
+    fun `a real gesture right after a resize is still felt`() {
+        // Only the pixels the resize can account for are discounted; a reader who reaches for
+        // the toolbar in the same moment still gets it.
+        val policy = policy()
+        var y = 4_000
+        repeat(6) {
+            y += dp(20f)
+            policy.onScroll(dp(20f), y)
+        }
+        assertFalse(policy.desired)
+
+        policy.onChromeChanged(dp(84f).toFloat())
+        y -= dp(84f)
+        policy.onScroll(-dp(84f), y)
+
+        repeat(4) {
+            y -= dp(20f)
+            policy.onScroll(-dp(20f), y)
+        }
+        assertTrue("a deliberate pull up must still bring it back", policy.desired)
+    }
+
+    @Test
+    fun `at the end of a page the toolbar stops changing its mind`() {
+        // There is nothing left to reveal, and no room for the page to take up a change in the
+        // viewport's height — so every adjustment lands back here as another scroll event.
+        val policy = policy()
+        var y = 4_000
+        repeat(6) {
+            y += dp(20f)
+            policy.onScroll(dp(20f), y)
+        }
+        assertFalse(policy.desired)
+
+        // Bumping about at the bottom, in both directions, changes nothing.
+        repeat(10) {
+            policy.onScroll(-dp(40f), y, atBottom = true)
+            policy.onScroll(dp(40f), y, atBottom = true)
+        }
+        assertFalse("the toolbar holds whatever it was doing", policy.desired)
+    }
+
+    @Test
+    fun `pulling away from the end still brings the toolbar back`() {
+        // Freezing at the bottom must not strand it: the moment there is something below again,
+        // the page is scrollable and the ordinary rule applies.
+        val policy = policy()
+        var y = 4_000
+        repeat(6) {
+            y += dp(20f)
+            policy.onScroll(dp(20f), y)
+        }
+        policy.onScroll(-dp(10f), y, atBottom = true)
+
+        repeat(4) {
+            y -= dp(20f)
+            policy.onScroll(-dp(20f), y, atBottom = false)
+        }
+        assertTrue(policy.desired)
+    }
 }

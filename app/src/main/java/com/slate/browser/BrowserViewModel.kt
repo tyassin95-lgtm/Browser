@@ -575,10 +575,17 @@ class BrowserViewModel @JvmOverloads constructor(
         }
     }
 
-    fun onPageScrolled(delta: Int, scrollY: Int) {
+    /**
+     * The measured height of the chrome, which is the exact distance a page moves when it
+     * appears or disappears. Reported by the layout rather than assumed, because it is a toolbar
+     * plus whatever the system bars take, and that differs on every phone.
+     */
+    var chromeHeightPx by mutableStateOf(0f)
+
+    fun onPageScrolled(delta: Int, scrollY: Int, atBottom: Boolean = false) {
         if (!settings.value.hideBarsOnScroll || isOmniboxFocused || isImmersive) return
         if (isKeyboardVisible) return
-        chromeScrollPolicy.onScroll(delta, scrollY)
+        chromeScrollPolicy.onScroll(delta, scrollY, atBottom)
 
         if (chromeScrollPolicy.desired == chromeVisible) {
             chromeSettleJob?.cancel()
@@ -590,6 +597,9 @@ class BrowserViewModel @JvmOverloads constructor(
         chromeSettleJob = viewModelScope.launch {
             delay(CHROME_SETTLE_MS)
             activeTab?.chromeVisible = chromeScrollPolicy.desired
+            // The page is about to be resized by exactly the chrome's height, and will report
+            // that as a scroll. Saying so here is what stops it being read as the user's.
+            chromeScrollPolicy.onChromeChanged(chromeHeightPx)
         }
     }
 
@@ -1458,8 +1468,10 @@ class BrowserViewModel @JvmOverloads constructor(
             }
         }
 
-        webView.setOnScrollChangeListener { _, _, scrollY, _, oldScrollY ->
-            onPageScrolled(scrollY - oldScrollY, scrollY)
+        webView.setOnScrollChangeListener { view, _, scrollY, _, oldScrollY ->
+            // Whether the page has anything left below. The engine's own answer, so it accounts
+            // for zoom, dynamic content and pages shorter than the window.
+            onPageScrolled(scrollY - oldScrollY, scrollY, atBottom = !view.canScrollVertically(1))
         }
 
         return webView

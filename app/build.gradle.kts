@@ -26,8 +26,8 @@ android {
         applicationId = "com.slate.browser"
         minSdk = 26
         targetSdk = 35
-        versionCode = 20
-        versionName = "2.7"
+        versionCode = 21
+        versionName = "2.7.1"
         vectorDrawables.useSupportLibrary = true
     }
 
